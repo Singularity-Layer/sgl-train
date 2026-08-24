@@ -1,3 +1,4 @@
+import pytest
 from runner.dataset import validate_row, load_jsonl, split
 
 GOOD = {"messages": [{"role": "user", "content": "hi"},
@@ -37,17 +38,20 @@ def test_load_jsonl_counts_and_drops():
     text = "\n".join([
         '{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"}]}',
         "not json",
-        '{"messages":[{"role":"user","content":"e"}]}',
+        '{"messages":[]}',
         '{"messages":[{"role":"user","content":"c"},{"role":"assistant","content":"d"}]}',
         "",
     ])
     rows, stats = load_jsonl(text)
     assert len(rows) == 2
-    assert stats.total == 3
+    # total counts every non-empty line including unparseable ones, so
+    # dropped == sum(reasons.values()) — the only honest data-quality signal allowed
+    # since row content is never logged.
+    assert stats.total == 4
     assert stats.kept == 2
-    assert stats.dropped == 1
+    assert stats.dropped == 2
     assert stats.reasons["bad_json"] == 1
-    assert stats.reasons["no_assistant_turn"] == 1
+    assert stats.reasons["no_messages"] == 1
 
 
 def test_split_is_deterministic_for_a_seed():
@@ -70,3 +74,18 @@ def test_split_always_leaves_at_least_one_eval_row():
     train, ev = split(rows, 0.05, seed=1)
     assert len(ev) == 1
     assert len(train) == 1
+
+
+def test_split_rejects_fewer_than_two_examples():
+    rows, _ = load_jsonl('{"messages":[{"role":"user","content":"a"},{"role":"assistant","content":"b"}]}')
+    with pytest.raises(ValueError, match="at least 2"):
+        split(rows, 0.1, seed=1)
+
+
+def test_validate_row_rejects_empty_messages_list():
+    assert validate_row({"messages": []}) == "no_messages"
+
+
+def test_validate_row_rejects_non_dict_message():
+    row = {"messages": ["hi"]}
+    assert validate_row(row) == "bad_message"

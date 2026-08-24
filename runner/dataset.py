@@ -56,12 +56,12 @@ def load_jsonl(text: str) -> tuple[list[Example], DatasetStats]:
         line = line.strip()
         if not line:
             continue
+        total += 1
         try:
             obj = json.loads(line)
         except json.JSONDecodeError:
             reasons["bad_json"] = reasons.get("bad_json", 0) + 1
             continue
-        total += 1
         reason = validate_row(obj)
         if reason is not None:
             reasons[reason] = reasons.get(reason, 0) + 1
@@ -75,9 +75,14 @@ def split(examples: list[Example], eval_split: float, seed: int
           ) -> tuple[list[Example], list[Example]]:
     """Deterministic held-out split. Same seed, same rows, always.
 
+    Requires at least 2 examples to guarantee both train and eval sets have
+    at least one row. Raises ValueError if len(examples) < 2.
+
     Guarantees at least one eval row (an eval set of zero would make the run
     unmeasurable, which is worse than a small train set).
     """
+    if len(examples) < 2:
+        raise ValueError("need at least 2 examples to split")
     shuffled = list(examples)
     random.Random(seed).shuffle(shuffled)
     n_eval = max(1, int(round(len(shuffled) * eval_split))) if shuffled else 0
