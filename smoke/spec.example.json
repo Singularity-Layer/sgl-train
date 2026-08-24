@@ -1,0 +1,20 @@
+{
+  "run_id": "smoke-0001",
+  "kind": "finetune",
+  "base_model": { "hf_repo": "Qwen/Qwen2.5-0.5B-Instruct", "revision": "PUT_SHA_HERE" },
+  "dataset_url": "PUT_DATASET_GET_URL_HERE",
+  "quantize": "Q4_K_M",
+  "progress_url": "PUT_PROGRESS_URL_HERE",
+  "result_url": "PUT_RESULT_URL_HERE",
+  "token": "smoke",
+  "artifact_urls": {
+    "adapter": "PUT_ADAPTER_PUT_URL_HERE",
+    "gguf": "PUT_GGUF_PUT_URL_HERE",
+    "report": "PUT_REPORT_PUT_URL_HERE"
+  },
+  "recipe": {
+    "lora_rank": 16, "lora_alpha": 32, "lr": 2e-4, "epochs": 3,
+    "max_seq_len": 512, "batch_size": 4, "grad_accum": 4,
+    "eval_split": 0.2, "seed": 1234
+  }
+}
