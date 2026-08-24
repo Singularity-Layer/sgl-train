@@ -13,6 +13,10 @@ import subprocess
 
 CONVERT_SCRIPT = "/opt/llama.cpp/convert_hf_to_gguf.py"
 QUANTIZE_BIN = "/opt/sgl/bin/llama-quantize"
+# The converter's requirements pin a different torch/transformers/protobuf than
+# the training stack, so it lives in its own venv (see Dockerfile) rather than
+# the main interpreter this process runs under.
+CONVERT_PY = "/opt/sgl/convert-venv/bin/python"
 
 
 class ConvertError(RuntimeError):
@@ -22,23 +26,25 @@ class ConvertError(RuntimeError):
 def convert_commands(merged_dir: str, out_gguf: str, quantize: str) -> list[list[str]]:
     f16 = out_gguf.replace(".gguf", ".f16.gguf")
     return [
-        ["python", CONVERT_SCRIPT, merged_dir, "--outfile", f16, "--outtype", "f16"],
+        [CONVERT_PY, CONVERT_SCRIPT, merged_dir, "--outfile", f16, "--outtype", "f16"],
         [QUANTIZE_BIN, f16, out_gguf, quantize],
     ]
 
 
-def _subprocess_run(cmd: list[str]) -> int:
-    return subprocess.run(cmd, check=False).returncode
+def _subprocess_run(cmd: list[str]) -> tuple[int, str]:
+    p = subprocess.run(cmd, check=False, capture_output=True, text=True)
+    return p.returncode, (p.stderr or "")[-2000:]
 
 
 def to_gguf(merged_dir: str, out_gguf: str, quantize: str, run=None) -> None:
     runner = run or _subprocess_run
     cmds = convert_commands(merged_dir, out_gguf, quantize)
     for cmd in cmds:
-        code = runner(cmd)
+        res = runner(cmd)
+        code, err = res if isinstance(res, tuple) else (res, "")
         if code != 0:
             step = "convert" if "convert_hf_to_gguf.py" in cmd[1] else "quantize"
-            raise ConvertError(f"{step} failed with exit code {code}")
+            raise ConvertError(f"{step} failed with exit code {code}: {err}".rstrip(': '))
     f16 = cmds[1][1]
     if os.path.exists(f16):
         os.remove(f16)

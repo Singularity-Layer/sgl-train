@@ -12,12 +12,14 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 import urllib.request
 from dataclasses import dataclass
 from typing import Callable
 
 from .artifacts import paths, put_file, tar_dir
 from .dataset import load_jsonl, split
+from .errors import InfraError
 from .evalmath import improved
 from .report import Reporter
 from .spec import SpecError, parse_spec
@@ -27,6 +29,9 @@ EXIT_SPEC = 2
 EXIT_DATA = 3
 EXIT_TRAIN = 4
 EXIT_UPLOAD = 5
+EXIT_INFRA = 6
+
+FETCH_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -38,6 +43,7 @@ class Deps:
     reporter_factory: Callable
     write_report: Callable
     tar: Callable
+    sleep: Callable = time.sleep
 
 
 def execute(raw_spec: dict, deps: Deps) -> int:
@@ -51,9 +57,27 @@ def execute(raw_spec: dict, deps: Deps) -> int:
     rep = deps.reporter_factory(spec)
     dirs = paths(spec.run_id)
 
+    if spec.kind != "finetune":
+        rep.result("failed", {"error": f"kind '{spec.kind}' is not supported by this image"})
+        return EXIT_SPEC
+
+    raw_dataset = None
+    fetch_error: Exception | None = None
+    for attempt in range(1, FETCH_ATTEMPTS + 1):
+        try:
+            raw_dataset = deps.fetch(spec.dataset_url)
+            fetch_error = None
+            break
+        except Exception as e:
+            fetch_error = e
+            if attempt < FETCH_ATTEMPTS:
+                deps.sleep(2 * attempt)
+    if fetch_error is not None:
+        rep.result("failed", {"error": f"dataset fetch failed: {fetch_error}"})
+        return EXIT_INFRA
+
     try:
-        rep.progress("fetching_dataset", 0.02)
-        rows, stats = load_jsonl(deps.fetch(spec.dataset_url))
+        rows, stats = load_jsonl(raw_dataset)
         if len(rows) < 2:
             rep.result("failed", {
                 "error": f"dataset unusable: {stats.kept} valid rows of {stats.total}",
@@ -66,6 +90,9 @@ def execute(raw_spec: dict, deps: Deps) -> int:
 
     try:
         outcome = deps.train(spec, train_rows, eval_rows, dirs, rep.progress)
+    except InfraError as e:
+        rep.result("failed", {"error": str(e)})
+        return EXIT_INFRA
     except Exception as e:
         rep.result("failed", {"error": f"training failed: {e}"})
         return EXIT_TRAIN
@@ -93,24 +120,31 @@ def execute(raw_spec: dict, deps: Deps) -> int:
         "eval_rows": len(eval_rows),
         "gguf_ok": gguf_ok,
         "gguf_error": gguf_error,
+        "device": outcome.get("device"),
+        "dtype": outcome.get("dtype"),
     }
 
-    rep.progress("uploading", 0.97)
-    deps.tar(dirs["adapter_dir"], dirs["adapter_tar"])
-    if not deps.upload(spec.artifact_urls["adapter"], dirs["adapter_tar"]):
-        rep.result("failed", {"error": "adapter upload failed", **report})
+    try:
+        rep.progress("uploading", 0.97)
+        deps.tar(dirs["adapter_dir"], dirs["adapter_tar"])
+        if not deps.upload(spec.artifact_urls["adapter"], dirs["adapter_tar"]):
+            rep.result("failed", {"error": "adapter upload failed", **report})
+            return EXIT_UPLOAD
+        if gguf_ok and not deps.upload(spec.artifact_urls["gguf"], dirs["gguf"]):
+            gguf_ok, gguf_error = False, "gguf upload failed"
+            report["gguf_ok"] = False
+            report["gguf_error"] = gguf_error
+
+        # report.json is written and uploaded LAST so it can never contradict the
+        # result callback — every fact it states is final by this point.
+        deps.write_report(dirs["report"], report)
+        deps.upload(spec.artifact_urls["report"], dirs["report"])
+    except Exception as e:
+        rep.result("failed", {"error": f"artifact stage failed: {e}", **report})
         return EXIT_UPLOAD
-    if gguf_ok and not deps.upload(spec.artifact_urls["gguf"], dirs["gguf"]):
-        gguf_ok, gguf_error = False, "gguf upload failed"
-        report["gguf_ok"] = False
-        report["gguf_error"] = gguf_error
 
-    # report.json is written and uploaded LAST so it can never contradict the
-    # result callback — every fact it states is final by this point.
-    deps.write_report(dirs["report"], report)
-    deps.upload(spec.artifact_urls["report"], dirs["report"])
-
-    rep.result("completed", report)
+    if not rep.result("completed", report):
+        print(f"[sgl] WARNING: result callback delivery failed for run {spec.run_id}", file=sys.stderr)
     return EXIT_OK
 
 

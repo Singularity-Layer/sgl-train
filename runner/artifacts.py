@@ -6,14 +6,19 @@ posture as agent backups where the worker never touches the bytes either.
 from __future__ import annotations
 
 import os
+import re
 import tarfile
 import urllib.error
 import urllib.request
 
 WORKDIR = "/opt/sgl/work"
 
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
+
 
 def paths(run_id: str) -> dict[str, str]:
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise ValueError("invalid run_id")
     root = os.path.join(WORKDIR, run_id)
     return {
         "root": root,

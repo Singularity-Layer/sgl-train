@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 
+from .errors import InfraError
 from .evalmath import aggregate
 
 
@@ -78,15 +79,26 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
 
     r = spec.recipe
     _set_all_seeds(r.seed)
+    if not torch.cuda.is_available() and os.environ.get("SGL_ALLOW_CPU") != "1":
+        raise InfraError(
+            "CUDA is unavailable on this box — refusing to train on CPU "
+            "(set SGL_ALLOW_CPU=1 to override for local testing)")
     device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else torch.float16
+    if device == "cpu":
+        dtype = torch.float32  # fp16 CPU training is broken
 
     on_progress("loading_model", 0.05, model=spec.hf_repo)
-    tokenizer = AutoTokenizer.from_pretrained(spec.hf_repo, revision=spec.hf_revision)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(spec.hf_repo, revision=spec.hf_revision)
+        model = AutoModelForCausalLM.from_pretrained(
+            spec.hf_repo, revision=spec.hf_revision,
+            torch_dtype=dtype, device_map=None)
+    except Exception as e:
+        raise InfraError(f"model download failed for {spec.hf_repo}@{spec.hf_revision}: {e}") from e
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
-    model = AutoModelForCausalLM.from_pretrained(
-        spec.hf_repo, revision=spec.hf_revision,
-        torch_dtype=torch.bfloat16, device_map=None).to(device)
+    model = model.to(device)
 
     train_enc = _encode(tokenizer, train_rows, r.max_seq_len)
     eval_enc = _encode(tokenizer, eval_rows, r.max_seq_len)
@@ -141,4 +153,5 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
     merged.save_pretrained(out_dirs["merged_dir"], safe_serialization=True)
     tokenizer.save_pretrained(out_dirs["merged_dir"])
 
-    return {"baseline": baseline, "final": final, "steps": step, "seed": r.seed}
+    return {"baseline": baseline, "final": final, "steps": step, "seed": r.seed,
+            "device": device, "dtype": str(dtype)}

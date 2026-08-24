@@ -30,3 +30,12 @@ unpinned model cannot be reproduced, and an unreproducible run cannot be verifie
 | 3 | dataset unusable | no, but warn before charging |
 | 4 | training failed (OOM etc.) | no, compute was delivered |
 | 5 | artifact upload failed | yes, no artifact delivered |
+| 6 | infrastructure failure (fetch/model download/no CUDA) | yes, our fault |
+
+## Environment contracts
+
+- `HF_TOKEN` — the backend may inject this env var for gated base models;
+  `huggingface_hub` reads it automatically, so no extra plumbing is needed here.
+- `SGL_ALLOW_CPU=1` — a local-testing override that lets `run_finetune` proceed
+  without a GPU. Never set this in production; without it, a box with no CUDA
+  raises `InfraError` (exit 6) instead of silently training on CPU.

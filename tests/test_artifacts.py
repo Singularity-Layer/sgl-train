@@ -1,5 +1,7 @@
 import os
 import tarfile
+
+import pytest
 from runner.artifacts import paths, tar_dir, put_file
 
 
@@ -9,6 +11,11 @@ def test_paths_are_scoped_to_the_run():
     assert p["adapter_tar"].endswith("adapter.tar.gz")
     assert p["gguf"].endswith("model.gguf")
     assert p["report"].endswith("report.json")
+
+
+def test_paths_rejects_a_path_traversal_run_id():
+    with pytest.raises(ValueError):
+        paths("../../etc/passwd")
 
 
 def test_tar_dir_round_trips(tmp_path):

@@ -27,12 +27,19 @@ RUN pip install --no-cache-dir \
 # convert_hf_to_gguf.py is pure Python and lives in the llama.cpp tree; llama-quantize
 # is a compiled binary we take from the prebuilt release rather than compiling here.
 RUN git clone --depth 1 --branch ${LLAMA_CPP_TAG} \
-      https://github.com/ggml-org/llama.cpp /opt/llama.cpp \
- && pip install --no-cache-dir -r /opt/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt
+      https://github.com/ggml-org/llama.cpp /opt/llama.cpp
+
+# Converter deps live in their OWN venv: the requirements file pins a CPU-only
+# torch + different transformers/protobuf and would CLOBBER the CUDA training
+# stack if installed into the main environment (verified against tag b9867).
+RUN python -m venv --without-pip /opt/sgl/convert-venv \
+ && curl -fsSL https://bootstrap.pypa.io/get-pip.py | /opt/sgl/convert-venv/bin/python \
+ && /opt/sgl/convert-venv/bin/pip install --no-cache-dir \
+      -r /opt/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt
 
 RUN mkdir -p /opt/sgl/bin /opt/sgl/work \
  && curl -fsSL -o /tmp/llama.tgz \
-      "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_TAG}/llama-${LLAMA_CPP_TAG}-bin-ubuntu-vulkan-x64.tar.gz" \
+      "https://github.com/ggml-org/llama.cpp/releases/download/${LLAMA_CPP_TAG}/llama-${LLAMA_CPP_TAG}-bin-ubuntu-x64.tar.gz" \
  && tar xzf /tmp/llama.tgz -C /tmp \
  && QBIN="$(find /tmp -type f -name llama-quantize | head -1)" && test -n "$QBIN" \
  && cp -a "$(dirname "$QBIN")"/. /opt/sgl/bin/ \

@@ -1,4 +1,6 @@
-from runner.main import execute, Deps, EXIT_OK, EXIT_SPEC, EXIT_DATA, EXIT_TRAIN, EXIT_UPLOAD
+from runner.errors import InfraError
+from runner.main import (execute, Deps, EXIT_OK, EXIT_SPEC, EXIT_DATA, EXIT_TRAIN,
+                          EXIT_UPLOAD, EXIT_INFRA)
 
 BASE = {
     "run_id": "r1", "kind": "finetune",
@@ -35,7 +37,8 @@ def make_deps(rep, **over):
         fetch=lambda url: ROWS,
         train=lambda s, tr, ev, d, cb: {"baseline": {"eval_loss": 2.0, "perplexity": 7.4, "eval_tokens": 10},
                                         "final": {"eval_loss": 1.0, "perplexity": 2.7, "eval_tokens": 10},
-                                        "steps": 5, "seed": 1},
+                                        "steps": 5, "seed": 1,
+                                        "device": "cuda", "dtype": "torch.bfloat16"},
         convert=lambda m, g, q: None,
         upload=lambda url, path: True,
         reporter_factory=lambda spec: rep,
@@ -55,6 +58,8 @@ def test_happy_path_reports_completed_with_both_scores():
     assert payload["final"]["eval_loss"] == 1.0
     assert payload["improved"] is True
     assert payload["seed"] == 1
+    assert payload["device"] == "cuda"
+    assert payload["dtype"] == "torch.bfloat16"
 
 
 def test_bad_spec_exits_without_touching_the_gpu():
@@ -135,3 +140,65 @@ def test_gguf_upload_failure_completes_but_report_says_gguf_failed():
     # the persisted report.json must agree with the result callback
     assert written["report"]["gguf_ok"] is False
     assert written["report"]["gguf_error"] == payload["gguf_error"]
+
+
+def test_kind_other_than_finetune_is_rejected():
+    rep = SpyReporter()
+    spec = dict(BASE, kind="scratch")
+    code = execute(spec, make_deps(rep))
+    assert code == EXIT_SPEC
+    assert "not supported" in rep.results[-1][1]["error"]
+
+
+def test_fetch_retries_and_gives_up_after_three_failures():
+    rep = SpyReporter()
+    calls = {"count": 0}
+
+    def flaky(url):
+        calls["count"] += 1
+        raise ConnectionError("boom")
+
+    sleeps = []
+    code = execute(BASE, make_deps(rep, fetch=flaky, sleep=lambda s: sleeps.append(s)))
+    assert code == EXIT_INFRA
+    assert calls["count"] == 3
+    assert len(sleeps) == 2
+    assert "dataset fetch failed" in rep.results[-1][1]["error"]
+
+
+def test_fetch_succeeds_after_two_failures():
+    rep = SpyReporter()
+    calls = {"count": 0}
+
+    def flaky(url):
+        calls["count"] += 1
+        if calls["count"] < 3:
+            raise ConnectionError("boom")
+        return ROWS
+
+    code = execute(BASE, make_deps(rep, fetch=flaky, sleep=lambda s: None))
+    assert code == EXIT_OK
+    assert calls["count"] == 3
+    assert rep.results[-1][0] == "completed"
+
+
+def test_tar_failure_is_reported_as_artifact_stage_failure():
+    rep = SpyReporter()
+
+    def boom(src, dest):
+        raise OSError("disk full")
+
+    code = execute(BASE, make_deps(rep, tar=boom))
+    assert code == EXIT_UPLOAD
+    assert "artifact stage failed" in rep.results[-1][1]["error"]
+
+
+def test_infra_error_from_training_is_exit_infra_not_exit_train():
+    rep = SpyReporter()
+
+    def boom(*a):
+        raise InfraError("CUDA is unavailable on this box")
+
+    code = execute(BASE, make_deps(rep, train=boom))
+    assert code == EXIT_INFRA
+    assert "CUDA is unavailable" in rep.results[-1][1]["error"]

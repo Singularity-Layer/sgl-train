@@ -1,11 +1,11 @@
 import pytest
-from runner.convert import convert_commands, to_gguf, ConvertError
+from runner.convert import convert_commands, to_gguf, ConvertError, CONVERT_PY
 
 
 def test_builds_a_two_step_pipeline():
     cmds = convert_commands("/w/merged", "/w/model.gguf", "Q4_K_M")
     assert len(cmds) == 2
-    assert cmds[0][0] == "python"
+    assert cmds[0][0] == CONVERT_PY
     assert "convert_hf_to_gguf.py" in cmds[0][1]
     assert "/w/merged" in cmds[0]
     assert cmds[1][-1] == "Q4_K_M"
@@ -30,3 +30,13 @@ def test_to_gguf_raises_on_failure():
 
 def test_to_gguf_succeeds_when_both_steps_exit_zero():
     to_gguf("/w/merged", "/w/model.gguf", "Q4_K_M", run=lambda cmd: 0)
+
+
+def test_to_gguf_includes_stderr_tail_when_run_returns_a_tuple():
+    def fake_run(cmd):
+        if "quantize" in cmd[0]:
+            return 1, "disk is full\n"
+        return 0, ""
+
+    with pytest.raises(ConvertError, match="disk is full"):
+        to_gguf("/w/merged", "/w/model.gguf", "Q4_K_M", run=fake_run)
