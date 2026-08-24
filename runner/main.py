@@ -94,17 +94,21 @@ def execute(raw_spec: dict, deps: Deps) -> int:
         "gguf_ok": gguf_ok,
         "gguf_error": gguf_error,
     }
-    deps.write_report(dirs["report"], report)
 
     rep.progress("uploading", 0.97)
     deps.tar(dirs["adapter_dir"], dirs["adapter_tar"])
     if not deps.upload(spec.artifact_urls["adapter"], dirs["adapter_tar"]):
         rep.result("failed", {"error": "adapter upload failed", **report})
         return EXIT_UPLOAD
-    deps.upload(spec.artifact_urls["report"], dirs["report"])
     if gguf_ok and not deps.upload(spec.artifact_urls["gguf"], dirs["gguf"]):
+        gguf_ok, gguf_error = False, "gguf upload failed"
         report["gguf_ok"] = False
-        report["gguf_error"] = "gguf upload failed"
+        report["gguf_error"] = gguf_error
+
+    # report.json is written and uploaded LAST so it can never contradict the
+    # result callback — every fact it states is final by this point.
+    deps.write_report(dirs["report"], report)
+    deps.upload(spec.artifact_urls["report"], dirs["report"])
 
     rep.result("completed", report)
     return EXIT_OK

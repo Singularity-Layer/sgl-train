@@ -114,3 +114,24 @@ def test_no_improvement_is_reported_honestly():
         "steps": 5, "seed": 1}
     assert execute(BASE, make_deps(rep, train=flat)) == EXIT_OK
     assert rep.results[-1][1]["improved"] is False
+
+
+def test_gguf_upload_failure_completes_but_report_says_gguf_failed():
+    rep = SpyReporter()
+    written = {}
+
+    def fake_write(path, obj):
+        written["report"] = dict(obj)
+
+    def gguf_upload_fails(url, path):
+        return "g.invalid" not in url   # only the gguf PUT fails
+
+    code = execute(BASE, make_deps(rep, upload=gguf_upload_fails, write_report=fake_write))
+    assert code == EXIT_OK
+    status, payload = rep.results[-1]
+    assert status == "completed"
+    assert payload["gguf_ok"] is False
+    assert "upload" in payload["gguf_error"]
+    # the persisted report.json must agree with the result callback
+    assert written["report"]["gguf_ok"] is False
+    assert written["report"]["gguf_error"] == payload["gguf_error"]
