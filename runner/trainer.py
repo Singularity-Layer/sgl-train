@@ -144,14 +144,20 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
     final = _evaluate(model, eval_batches)
 
     on_progress("saving", 0.92)
-    os.makedirs(out_dirs["adapter_dir"], exist_ok=True)
-    model.save_pretrained(out_dirs["adapter_dir"])
-    tokenizer.save_pretrained(out_dirs["adapter_dir"])
+    # Training-loop failures above stay EXIT_TRAIN — they're a fact about the run.
+    # A save-time OSError (disk full, read-only fs) is our infrastructure, not the
+    # buyer's data or recipe, so it converts to InfraError -> EXIT_INFRA (refundable).
+    try:
+        os.makedirs(out_dirs["adapter_dir"], exist_ok=True)
+        model.save_pretrained(out_dirs["adapter_dir"])
+        tokenizer.save_pretrained(out_dirs["adapter_dir"])
 
-    merged = model.merge_and_unload()
-    os.makedirs(out_dirs["merged_dir"], exist_ok=True)
-    merged.save_pretrained(out_dirs["merged_dir"], safe_serialization=True)
-    tokenizer.save_pretrained(out_dirs["merged_dir"])
+        merged = model.merge_and_unload()
+        os.makedirs(out_dirs["merged_dir"], exist_ok=True)
+        merged.save_pretrained(out_dirs["merged_dir"], safe_serialization=True)
+        tokenizer.save_pretrained(out_dirs["merged_dir"])
+    except OSError as e:
+        raise InfraError(f"artifact save failed (disk?): {e}") from e
 
     return {"baseline": baseline, "final": final, "steps": step, "seed": r.seed,
             "device": device, "dtype": str(dtype)}

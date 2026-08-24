@@ -5,10 +5,15 @@ the same bound is deliberate: the backend is the policy, this is the fail-safe.
 """
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 
 KINDS = {"finetune", "scratch", "autoresearch"}
 QUANTIZE = {"Q4_K_M", "Q5_K_M", "Q8_0"}
+
+_RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
+_LOCAL_HOSTS = {"localhost", "127.0.0.1"}
 
 CLAMPS: dict[str, tuple[float, float]] = {
     "lora_rank": (4, 64),
@@ -59,6 +64,16 @@ def _req(d: dict, key: str, where: str) -> object:
     if key not in d or d[key] in (None, ""):
         raise SpecError(f"{where}: missing required field '{key}'")
     return d[key]
+
+
+def _check_url(name: str, value: str) -> None:
+    """https everywhere, except http:// to localhost/127.0.0.1 for local testing."""
+    parts = urlsplit(value)
+    if parts.scheme == "https":
+        return
+    if parts.scheme == "http" and parts.hostname in _LOCAL_HOSTS:
+        return
+    raise SpecError(f"spec: {name} must be https")
 
 
 def _clamp(name: str, value: object) -> float | int:
@@ -118,17 +133,33 @@ def parse_spec(raw: dict) -> JobSpec:
         raise SpecError("spec: artifact_urls must be an object")
     for key in ("adapter", "gguf", "report"):
         _req(artifact_urls, key, "artifact_urls")
+    artifact_urls = {k: str(v) for k, v in artifact_urls.items()}
+    for key, value in artifact_urls.items():
+        _check_url(f"artifact_urls.{key}", value)
+
+    run_id = str(_req(raw, "run_id", "spec"))
+    # Validated here, not just in artifacts.paths(): parse_spec is the single gate
+    # execute() cannot route a traversal-y run_id past — paths() is defense in depth.
+    if not _RUN_ID_RE.fullmatch(run_id):
+        raise SpecError("spec: run_id must be 1-64 chars of [A-Za-z0-9_-]")
+
+    dataset_url = str(_req(raw, "dataset_url", "spec"))
+    progress_url = str(_req(raw, "progress_url", "spec"))
+    result_url = str(_req(raw, "result_url", "spec"))
+    _check_url("dataset_url", dataset_url)
+    _check_url("progress_url", progress_url)
+    _check_url("result_url", result_url)
 
     return JobSpec(
-        run_id=str(_req(raw, "run_id", "spec")),
+        run_id=run_id,
         kind=kind,
         hf_repo=hf_repo,
         hf_revision=hf_revision,
-        dataset_url=str(_req(raw, "dataset_url", "spec")),
+        dataset_url=dataset_url,
         quantize=quantize,
-        progress_url=str(_req(raw, "progress_url", "spec")),
-        result_url=str(_req(raw, "result_url", "spec")),
+        progress_url=progress_url,
+        result_url=result_url,
         token=str(_req(raw, "token", "spec")),
-        artifact_urls={k: str(v) for k, v in artifact_urls.items()},
+        artifact_urls=artifact_urls,
         recipe=recipe,
     )

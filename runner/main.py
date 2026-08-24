@@ -80,7 +80,11 @@ def execute(raw_spec: dict, deps: Deps) -> int:
         return EXIT_INFRA
 
     try:
-        rows, stats = load_jsonl(raw_dataset)
+        # Decoding happens INSIDE this try, not in _http_get: a non-UTF-8 buyer
+        # file is a data fault (EXIT_DATA, no refund), not an infra fault. str is
+        # accepted too so injected test fakes that already hand back text keep working.
+        text = raw_dataset.decode("utf-8") if isinstance(raw_dataset, (bytes, bytearray)) else raw_dataset
+        rows, stats = load_jsonl(text)
         if len(rows) < 2:
             rep.result("failed", {
                 "error": f"dataset unusable: {stats.kept} valid rows of {stats.total}",
@@ -141,6 +145,10 @@ def execute(raw_spec: dict, deps: Deps) -> int:
         # report.json is written and uploaded LAST so it can never contradict the
         # result callback — every fact it states is final by this point.
         deps.write_report(dirs["report"], report)
+        # The return value is DELIBERATELY ignored: the report artifact is optional
+        # nice-to-have storage — its full content also rides the result callback
+        # below — so a failed report PUT must not fail a run whose adapter (the
+        # thing the buyer is actually paying for) was already delivered.
         deps.upload(spec.artifact_urls["report"], dirs["report"])
     except Exception as e:
         rep.result("failed", {"error": f"artifact stage failed: {e}", **report})
@@ -151,9 +159,11 @@ def execute(raw_spec: dict, deps: Deps) -> int:
     return EXIT_OK
 
 
-def _http_get(url: str) -> str:
+def _http_get(url: str) -> bytes:
+    # Return raw bytes — decoding is the dataset-validation step's job, so a
+    # non-UTF-8 buyer file fails as EXIT_DATA, not as a retryable fetch error.
     with urllib.request.urlopen(url, timeout=300) as res:
-        return res.read().decode()
+        return res.read()
 
 
 def _write_report(path: str, obj: dict) -> None:

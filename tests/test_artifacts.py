@@ -31,18 +31,21 @@ def test_tar_dir_round_trips(tmp_path):
     assert "a.bin" in names and "cfg.json" in names
 
 
-def test_put_file_sends_bytes_and_reports_success(tmp_path):
+def test_put_file_streams_the_path_and_reports_success(tmp_path):
     f = tmp_path / "f.bin"
     f.write_bytes(b"hello")
     seen = {}
 
-    def fake_put(url, data, headers):
+    def fake_put(url, path, headers):
         seen["url"] = url
-        seen["data"] = data
+        seen["path"] = path
+        with open(path, "rb") as fh:
+            seen["data"] = fh.read()
         return 200
 
     assert put_file("https://x.invalid/put", str(f), put=fake_put) is True
     assert seen["url"] == "https://x.invalid/put"
+    assert seen["path"] == str(f)
     assert seen["data"] == b"hello"
 
 

@@ -54,3 +54,28 @@ def test_rejects_unknown_kind():
 def test_rejects_unknown_quantize():
     with pytest.raises(SpecError, match="quantize"):
         parse_spec({**BASE, "quantize": "Q99_ULTRA"})
+
+
+def test_rejects_a_path_traversal_run_id():
+    with pytest.raises(SpecError, match="run_id"):
+        parse_spec({**BASE, "run_id": "../etc"})
+
+
+def test_accepts_a_uuid_style_run_id():
+    s = parse_spec({**BASE, "run_id": "11111111-1111-1111-1111-111111111111"})
+    assert s.run_id == "11111111-1111-1111-1111-111111111111"
+
+
+def test_rejects_a_file_scheme_dataset_url():
+    with pytest.raises(SpecError, match="https"):
+        parse_spec({**BASE, "dataset_url": "file:///etc/passwd"})
+
+
+def test_accepts_http_to_localhost_for_local_testing():
+    s = parse_spec({**BASE, "dataset_url": "http://localhost:8080/x"})
+    assert s.dataset_url == "http://localhost:8080/x"
+
+
+def test_rejects_plain_http_to_a_real_host():
+    with pytest.raises(SpecError, match="https"):
+        parse_spec({**BASE, "dataset_url": "http://evil.example/x"})

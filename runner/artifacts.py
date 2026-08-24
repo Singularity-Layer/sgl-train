@@ -37,20 +37,22 @@ def tar_dir(src_dir: str, dest_tar: str) -> str:
     return dest_tar
 
 
-def _urllib_put(url: str, data: bytes, headers: dict[str, str]) -> int:
-    req = urllib.request.Request(url, data=data, headers=headers, method="PUT")
-    try:
-        with urllib.request.urlopen(req, timeout=600) as res:
-            return res.status
-    except urllib.error.HTTPError as e:
-        return e.code
-    except Exception:
-        return 599
+def _urllib_put(url: str, path: str, headers: dict[str, str]) -> int:
+    size = os.path.getsize(path)
+    with open(path, "rb") as fh:
+        req = urllib.request.Request(url, data=fh, headers={**headers, "Content-Length": str(size)}, method="PUT")
+        try:
+            with urllib.request.urlopen(req, timeout=600) as res:
+                return res.status
+        except urllib.error.HTTPError as e:
+            return e.code
+        except Exception:
+            return 599
 
 
 def put_file(url: str, path: str, put=None) -> bool:
+    # Streamed, not read into RAM: adapter/gguf artifacts can be gigabytes and this
+    # runs on the same box that just held a model in memory for training.
     sender = put or _urllib_put
-    with open(path, "rb") as fh:
-        data = fh.read()
-    status = sender(url, data, {"Content-Type": "application/octet-stream"})
+    status = sender(url, path, {"Content-Type": "application/octet-stream"})
     return 200 <= status < 300

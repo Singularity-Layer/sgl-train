@@ -193,6 +193,14 @@ def test_tar_failure_is_reported_as_artifact_stage_failure():
     assert "artifact stage failed" in rep.results[-1][1]["error"]
 
 
+def test_non_utf8_dataset_bytes_are_a_data_fault_not_an_infra_fault():
+    rep = SpyReporter()
+    code = execute(BASE, make_deps(rep, fetch=lambda url: b"\xff\xfe garbage"))
+    assert code == EXIT_DATA
+    assert rep.results[-1][0] == "failed"
+    assert "dataset" in rep.results[-1][1]["error"]
+
+
 def test_infra_error_from_training_is_exit_infra_not_exit_train():
     rep = SpyReporter()
 
