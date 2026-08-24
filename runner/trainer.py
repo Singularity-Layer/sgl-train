@@ -46,7 +46,9 @@ def _evaluate(model, batches) -> dict:
             labels = input_ids.clone()
             labels[attn == 0] = -100
             out = model(input_ids=input_ids, attention_mask=attn, labels=labels)
-            n_tokens = int((labels != -100).sum().item())
+            # HF's causal-LM loss averages over SHIFTED labels (labels[..., 1:]) — count
+            # exactly those positions so loss*n_tokens reconstructs the true sum.
+            n_tokens = int((labels[..., 1:] != -100).sum().item())
             # HF returns a MEAN over supervised tokens; multiply back out so the
             # aggregation is token-weighted rather than batch-weighted.
             acc.append((float(out.loss.item()) * n_tokens, n_tokens))
@@ -60,7 +62,7 @@ def _batched(tokenizer, encoded, batch_size, device):
     for i in range(0, len(encoded), batch_size):
         chunk = encoded[i:i + batch_size]
         width = max(len(c) for c in chunk)
-        pad = tokenizer.pad_token_id or tokenizer.eos_token_id
+        pad = tokenizer.pad_token_id if tokenizer.pad_token_id is not None else tokenizer.eos_token_id
         ids = torch.full((len(chunk), width), pad, dtype=torch.long)
         attn = torch.zeros((len(chunk), width), dtype=torch.long)
         for j, c in enumerate(chunk):
@@ -105,7 +107,8 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
     optim = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=r.lr)
 
-    total_steps = max(1, (len(train_enc) // r.batch_size) * r.epochs)
+    steps_per_epoch = -(-len(train_enc) // r.batch_size)  # ceil — _batched yields the trailing partial batch
+    total_steps = max(1, steps_per_epoch * r.epochs)
     step = 0
     model.train()
     for epoch in range(r.epochs):
