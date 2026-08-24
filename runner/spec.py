@@ -5,6 +5,8 @@ the same bound is deliberate: the backend is the policy, this is the fail-safe.
 """
 from __future__ import annotations
 
+import ipaddress
+import os
 import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
@@ -13,7 +15,6 @@ KINDS = {"finetune", "scratch", "autoresearch"}
 QUANTIZE = {"Q4_K_M", "Q5_K_M", "Q8_0"}
 
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
-_LOCAL_HOSTS = {"localhost", "127.0.0.1"}
 
 CLAMPS: dict[str, tuple[float, float]] = {
     "lora_rank": (4, 64),
@@ -67,13 +68,46 @@ def _req(d: dict, key: str, where: str) -> object:
 
 
 def _check_url(name: str, value: str) -> None:
-    """https everywhere, except http:// to localhost/127.0.0.1 for local testing."""
+    """https everywhere, and never a private/loopback/link-local target.
+
+    The one escape hatch is SGL_ALLOW_LOCAL_URLS=1, which allows http and
+    lifts the private/loopback/localhost block for local testing. Never set
+    it in production: the backend is the only legitimate spec author, and it
+    always hands out https URLs to public hosts.
+    """
+    allow_local = os.environ.get("SGL_ALLOW_LOCAL_URLS") == "1"
     parts = urlsplit(value)
-    if parts.scheme == "https":
+
+    if parts.scheme != "https" and not (allow_local and parts.scheme == "http"):
+        raise SpecError(f"spec: {name} must be https")
+
+    host = parts.hostname
+    if not host:
+        raise SpecError(f"spec: {name} has no host")
+
+    if allow_local:
         return
-    if parts.scheme == "http" and parts.hostname in _LOCAL_HOSTS:
+
+    if host.lower() == "localhost":
+        raise SpecError(f"spec: {name} must not target a private or local address")
+
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        # host is a DNS name, not an IP literal — we don't do DNS resolution
+        # here. The backend's URL allowlist (Plan 3) owns rejecting DNS names
+        # that resolve to private/local addresses.
         return
-    raise SpecError(f"spec: {name} must be https")
+
+    if (
+        ip.is_loopback
+        or ip.is_private
+        or ip.is_link_local
+        or ip.is_reserved
+        or ip.is_multicast
+        or ip.is_unspecified
+    ):
+        raise SpecError(f"spec: {name} must not target a private or local address")
 
 
 def _clamp(name: str, value: object) -> float | int:

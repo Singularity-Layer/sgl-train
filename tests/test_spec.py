@@ -71,7 +71,8 @@ def test_rejects_a_file_scheme_dataset_url():
         parse_spec({**BASE, "dataset_url": "file:///etc/passwd"})
 
 
-def test_accepts_http_to_localhost_for_local_testing():
+def test_accepts_http_to_localhost_for_local_testing(monkeypatch):
+    monkeypatch.setenv("SGL_ALLOW_LOCAL_URLS", "1")
     s = parse_spec({**BASE, "dataset_url": "http://localhost:8080/x"})
     assert s.dataset_url == "http://localhost:8080/x"
 
@@ -79,3 +80,34 @@ def test_accepts_http_to_localhost_for_local_testing():
 def test_rejects_plain_http_to_a_real_host():
     with pytest.raises(SpecError, match="https"):
         parse_spec({**BASE, "dataset_url": "http://evil.example/x"})
+
+
+def test_rejects_https_to_loopback_ip():
+    with pytest.raises(SpecError, match="private or local"):
+        parse_spec({**BASE, "dataset_url": "https://127.0.0.1/x"})
+
+
+def test_rejects_https_to_cloud_metadata_ip():
+    with pytest.raises(SpecError, match="private or local"):
+        parse_spec({**BASE, "dataset_url": "https://169.254.169.254/x"})
+
+
+def test_rejects_https_with_empty_host():
+    with pytest.raises(SpecError, match="no host"):
+        parse_spec({**BASE, "dataset_url": "https:///x"})
+
+
+def test_rejects_https_to_localhost():
+    with pytest.raises(SpecError, match="private or local"):
+        parse_spec({**BASE, "dataset_url": "https://localhost/x"})
+
+
+def test_rejects_https_to_ipv6_loopback():
+    with pytest.raises(SpecError, match="private or local"):
+        parse_spec({**BASE, "dataset_url": "https://[::1]/x"})
+
+
+def test_accepts_https_to_loopback_ip_with_local_urls_allowed(monkeypatch):
+    monkeypatch.setenv("SGL_ALLOW_LOCAL_URLS", "1")
+    s = parse_spec({**BASE, "dataset_url": "https://127.0.0.1/x"})
+    assert s.dataset_url == "https://127.0.0.1/x"
