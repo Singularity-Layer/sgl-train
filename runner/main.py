@@ -61,6 +61,9 @@ def execute(raw_spec: dict, deps: Deps) -> int:
         rep.result("failed", {"error": f"kind '{spec.kind}' is not supported by this image"})
         return EXIT_SPEC
 
+    # First liveness signal BEFORE the fetch loop — a run stuck in fetch retries
+    # (up to 3 slow timeouts) must not look dead to the watchdog.
+    rep.progress("fetching_dataset", 0.02)
     raw_dataset = None
     fetch_error: Exception | None = None
     for attempt in range(1, FETCH_ATTEMPTS + 1):
