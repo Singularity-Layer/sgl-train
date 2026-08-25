@@ -161,24 +161,37 @@ def test_unsloth_mirror_pin_parses_when_both_present():
 def test_unsloth_mirror_pin_rejects_repo_without_revision():
     raw = {**BASE, "base_model": {
         **BASE["base_model"], "unsloth_repo": "unsloth/Qwen2.5-0.5B-Instruct"}}
-    with pytest.raises(SpecError, match="unsloth_repo.*unsloth_revision"):
+    with pytest.raises(SpecError, match="must both be present or both be absent"):
         parse_spec(raw)
 
 
 def test_unsloth_mirror_pin_rejects_revision_without_repo():
     raw = {**BASE, "base_model": {
         **BASE["base_model"], "unsloth_revision": "ae616882a38b36759fc46ac3fd6769498833b913"}}
-    with pytest.raises(SpecError, match="unsloth_repo.*unsloth_revision"):
+    with pytest.raises(SpecError, match="must both be present or both be absent"):
         parse_spec(raw)
 
 
-@pytest.mark.parametrize("empty", ["", None])
-def test_unsloth_mirror_pin_treats_empty_string_as_absent(empty):
+@pytest.mark.parametrize("empty", ["", "   "])
+def test_unsloth_mirror_pin_rejects_empty_string(empty):
+    """An empty-string pin is a MALFORMED pin, not an absent one.
+
+    Reading it as "absent" would turn a backend bug into a silent engine
+    downgrade (unsloth skipped, vanilla run) instead of a loud failure.
+    Explicit null / a missing key are the only ways to mean "no pin".
+    """
     raw = {**BASE, "base_model": {
         **BASE["base_model"], "unsloth_repo": empty, "unsloth_revision": empty}}
-    s = parse_spec(raw)
-    assert s.unsloth_repo is None
-    assert s.unsloth_revision is None
+    with pytest.raises(SpecError, match="must be a non-empty string when present"):
+        parse_spec(raw)
+
+
+def test_unsloth_mirror_pin_absent_via_null_or_missing():
+    """Only a missing key or an explicit null means 'no pin'."""
+    for bm in ({**BASE["base_model"]},
+               {**BASE["base_model"], "unsloth_repo": None, "unsloth_revision": None}):
+        s = parse_spec({**BASE, "base_model": bm})
+        assert s.unsloth_repo is None and s.unsloth_revision is None
 
 
 # --- Strict pin validation: both fields must be non-empty strings -----
@@ -190,7 +203,7 @@ def test_unsloth_repo_with_whitespace_only_raises():
         "unsloth_repo": "   ",
         "unsloth_revision": "ae616882a38b36759fc46ac3fd6769498833b913",
     }}
-    with pytest.raises(SpecError, match="unsloth_repo.*unsloth_revision"):
+    with pytest.raises(SpecError, match="must be a non-empty string when present"):
         parse_spec(raw)
 
 
@@ -201,7 +214,7 @@ def test_unsloth_revision_with_whitespace_only_raises():
         "unsloth_repo": "unsloth/Qwen2.5-0.5B-Instruct",
         "unsloth_revision": "  \t  ",
     }}
-    with pytest.raises(SpecError, match="unsloth_repo.*unsloth_revision"):
+    with pytest.raises(SpecError, match="must be a non-empty string when present"):
         parse_spec(raw)
 
 
@@ -213,7 +226,7 @@ def test_unsloth_repo_non_string_raises(non_string):
         "unsloth_repo": non_string,
         "unsloth_revision": "ae616882a38b36759fc46ac3fd6769498833b913",
     }}
-    with pytest.raises(SpecError, match="unsloth_repo.*unsloth_revision"):
+    with pytest.raises(SpecError, match="must be a non-empty string when present"):
         parse_spec(raw)
 
 
@@ -225,7 +238,7 @@ def test_unsloth_revision_non_string_raises(non_string):
         "unsloth_repo": "unsloth/Qwen2.5-0.5B-Instruct",
         "unsloth_revision": non_string,
     }}
-    with pytest.raises(SpecError, match="unsloth_repo.*unsloth_revision"):
+    with pytest.raises(SpecError, match="must be a non-empty string when present"):
         parse_spec(raw)
 
 

@@ -73,30 +73,32 @@ def _req(d: dict, key: str, where: str) -> object:
 def _optional_pair(d: dict, key_a: str, key_b: str, where: str) -> tuple[str | None, str | None]:
     """Both-or-neither optional string pair, e.g. unsloth_repo/unsloth_revision.
 
-    Presence requires each field, when present, to be an actual str whose
-    .strip() is non-empty. Missing key, None, empty/whitespace string, or
-    non-str type all count as absent. If exactly one of the pair is present
-    the spec is unusable — a repo with no pinned revision (or vice versa)
-    is not reproducible — so that raises SpecError rather than silently
-    picking a default.
+    ABSENT means the key is missing entirely, or explicitly null. Anything else
+    is PRESENT and must be an actual str with a non-empty .strip() — a present
+    but malformed value (0, [], {}, True, "   ") raises rather than being read
+    as absent, because silently downgrading a malformed pin to "no pin" would
+    turn a backend bug into a quiet engine downgrade instead of a loud failure.
 
-    Stored values are stripped of leading/trailing whitespace.
+    Exactly one of the pair present is also fatal: a repo with no pinned
+    revision (or vice versa) is not reproducible.
+
+    Stored values are stripped.
     """
-    def is_valid_string(v: object) -> bool:
-        return isinstance(v, str) and v.strip() != ""
+    def classify(key: str) -> str | None:
+        if key not in d or d[key] is None:
+            return None
+        v = d[key]
+        if not isinstance(v, str) or v.strip() == "":
+            raise SpecError(
+                f"{where}: '{key}' must be a non-empty string when present "
+                f"(got {type(v).__name__})")
+        return v.strip()
 
-    a_present = is_valid_string(d.get(key_a))
-    b_present = is_valid_string(d.get(key_b))
-    if a_present != b_present:
+    a_val = classify(key_a)
+    b_val = classify(key_b)
+    if (a_val is None) != (b_val is None):
         raise SpecError(f"{where}: '{key_a}' and '{key_b}' must both be present or both be absent")
-    if not a_present:
-        return None, None
-    # Both are present and valid strings; strip and return.
-    a_val = d[key_a]  # type: ignore  # guarded by is_valid_string above
-    b_val = d[key_b]  # type: ignore
-    if not isinstance(a_val, str) or not isinstance(b_val, str):
-        raise SpecError(f"{where}: '{key_a}' and '{key_b}' must be strings")
-    return a_val.strip(), b_val.strip()
+    return a_val, b_val
 
 
 def _check_url(name: str, value: str) -> None:
