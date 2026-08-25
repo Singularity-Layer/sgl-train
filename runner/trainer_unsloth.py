@@ -53,6 +53,7 @@ def wrap_unsloth_lora(model, recipe):
         lora_alpha=recipe.lora_alpha,
         lora_dropout=0.05,
         bias="none",
+        random_state=recipe.seed,
     )
 
 
@@ -82,4 +83,4 @@ def save_unsloth(model, tokenizer, out_dirs, load_in_4bit) -> None:
             merged.save_pretrained(out_dirs["merged_dir"], safe_serialization=True)
             tokenizer.save_pretrained(out_dirs["merged_dir"])
     except OSError as e:
-        raise InfraError(f"artifact save failed (disk?): {e}") from e
+        raise InfraError(f"[engine=unsloth] artifact save failed (disk?): {e}") from e

@@ -16,6 +16,17 @@ from .errors import InfraError
 from .evalmath import aggregate
 
 
+def normalize_engine_mode(env_value: str) -> str:
+    """Single parser for the raw SGL_ENGINE string -> {'auto', 'vanilla',
+    'unsloth'}. Both resolve_engine (the pure decision table below) and
+    run_finetune (which needs the normalized mode BEFORE it knows whether the
+    unsloth probe succeeded, to decide which branch to even attempt) call
+    this — one parser, so 'strip/lower/default-to-auto' can't drift between
+    the two call sites.
+    """
+    return (env_value or "auto").strip().lower()
+
+
 def resolve_engine(env_value: str, unsloth_probe_result: bool) -> str:
     """Pure decision table for SGL_ENGINE ∈ {auto (default), vanilla, unsloth}.
 
@@ -30,7 +41,7 @@ def resolve_engine(env_value: str, unsloth_probe_result: bool) -> str:
     this function is consulted. It's injected here purely so this decision
     table is testable without torch or unsloth installed.
     """
-    v = (env_value or "auto").strip().lower()
+    v = normalize_engine_mode(env_value)
     if v == "vanilla":
         return "vanilla"
     if v == "unsloth":
@@ -46,7 +57,8 @@ def require_engine_for_recipe(engine: str, load_in_4bit: bool) -> None:
     """
     if load_in_4bit and engine == "vanilla":
         raise InfraError(
-            "4-bit training requires the unsloth engine, which is unavailable on this box")
+            f"[engine={engine}] 4-bit training requires the unsloth engine, which is unavailable "
+            f"on this box")
 
 
 def _set_all_seeds(seed: int) -> None:
@@ -119,7 +131,8 @@ def _load_vanilla(spec, dtype, device):
             spec.hf_repo, revision=spec.hf_revision,
             torch_dtype=dtype, device_map=None)
     except Exception as e:
-        raise InfraError(f"model download failed for {spec.hf_repo}@{spec.hf_revision}: {e}") from e
+        raise InfraError(
+            f"[engine=vanilla] model download failed for {spec.hf_repo}@{spec.hf_revision}: {e}") from e
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model.to(device), tokenizer
@@ -149,7 +162,7 @@ def _save_vanilla(model, tokenizer, out_dirs) -> None:
         merged.save_pretrained(out_dirs["merged_dir"], safe_serialization=True)
         tokenizer.save_pretrained(out_dirs["merged_dir"])
     except OSError as e:
-        raise InfraError(f"artifact save failed (disk?): {e}") from e
+        raise InfraError(f"[engine=vanilla] artifact save failed (disk?): {e}") from e
 
 
 def _load_unsloth(spec, dtype, device):
@@ -162,19 +175,27 @@ def _wrap_unsloth(model, r):
     return wrap_unsloth_lora(model, r)
 
 
-def _attempt_engine(load_fn, wrap_fn, spec, r, dtype, device, train_rows, eval_rows, on_progress):
+def _attempt_engine(load_fn, wrap_fn, spec, r, dtype, device, train_rows, eval_rows, on_progress,
+                     engine_name):
     """Shared load -> encode -> baseline_eval -> wrap sequence, parameterized
     by engine-specific load/wrap functions. Used for both engines so the
     baseline honesty guarantee (eval on the UNWRAPPED model, before any LoRA
     is attached) and the eval math are identical regardless of which engine
     ran — that's what keeps baseline/final numbers comparable across engines.
+
+    engine_name is used ONLY to label exceptions raised from here (e.g.
+    "[engine=unsloth] dataset produced no usable sequences...") — a training
+    failure's error message should say which engine was actually running,
+    since main.py's failed-result payload has no other way to know that if
+    train() raised before the caller could record it.
     """
     model, tokenizer = load_fn(spec, dtype, device)
 
     train_enc = _encode(tokenizer, train_rows, r.max_seq_len)
     eval_enc = _encode(tokenizer, eval_rows, r.max_seq_len)
     if not train_enc or not eval_enc:
-        raise RuntimeError("dataset produced no usable sequences after tokenization")
+        raise RuntimeError(
+            f"[engine={engine_name}] dataset produced no usable sequences after tokenization")
 
     # BASELINE FIRST, on the untouched base model. Without this number there is
     # nothing to compare the final model to, and "it trained" is not a result.
@@ -205,19 +226,21 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
 
     on_progress("loading_model", 0.05, model=spec.hf_repo)
 
-    v = (engine_mode or "auto").strip().lower()
+    v = normalize_engine_mode(engine_mode)
     if v == "vanilla":
         # Skip the unsloth attempt entirely (rule: 'vanilla' never tries it).
         engine = resolve_engine(engine_mode, False)
         require_engine_for_recipe(engine, r.load_in_4bit)
         model, tokenizer, train_enc, eval_batches, baseline = _attempt_engine(
-            _load_vanilla, _wrap_vanilla_lora, spec, r, dtype, device, train_rows, eval_rows, on_progress)
+            _load_vanilla, _wrap_vanilla_lora, spec, r, dtype, device, train_rows, eval_rows, on_progress,
+            engine_name="vanilla")
     elif v == "unsloth":
         # Forced: no fallback (testing mode). Any exception — import, load, an
         # empty-dataset RuntimeError, a wrap failure — propagates as-is.
         engine = resolve_engine(engine_mode, True)
         model, tokenizer, train_enc, eval_batches, baseline = _attempt_engine(
-            _load_unsloth, _wrap_unsloth, spec, r, dtype, device, train_rows, eval_rows, on_progress)
+            _load_unsloth, _wrap_unsloth, spec, r, dtype, device, train_rows, eval_rows, on_progress,
+            engine_name="unsloth")
     else:
         # auto: try the unsloth load path. ANY exception during import, model
         # load, or LoRA wrap falls back to the existing vanilla path unchanged.
@@ -225,16 +248,24 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
         # once the training loop has started.
         try:
             model, tokenizer, train_enc, eval_batches, baseline = _attempt_engine(
-                _load_unsloth, _wrap_unsloth, spec, r, dtype, device, train_rows, eval_rows, on_progress)
+                _load_unsloth, _wrap_unsloth, spec, r, dtype, device, train_rows, eval_rows, on_progress,
+                engine_name="unsloth")
             engine = resolve_engine(engine_mode, True)
         except Exception as e:
             engine_fallback_reason = type(e).__name__
-            print(f"[sgl] unsloth unavailable ({engine_fallback_reason}), falling back to vanilla",
-                  file=sys.stderr)
+            # The discarded unsloth attempt (model load, RNG-consuming init,
+            # etc.) already advanced/clobbered global RNG state. Reseed before
+            # the retry so the vanilla run is bit-identical to a pure-vanilla
+            # run with the same seed — not "vanilla, but perturbed by however
+            # far the failed unsloth attempt got".
+            _set_all_seeds(r.seed)
             engine = resolve_engine(engine_mode, False)
             require_engine_for_recipe(engine, r.load_in_4bit)
+            print(f"[sgl] [engine=unsloth] unsloth unavailable ({engine_fallback_reason}), "
+                  f"falling back to vanilla", file=sys.stderr)
             model, tokenizer, train_enc, eval_batches, baseline = _attempt_engine(
-                _load_vanilla, _wrap_vanilla_lora, spec, r, dtype, device, train_rows, eval_rows, on_progress)
+                _load_vanilla, _wrap_vanilla_lora, spec, r, dtype, device, train_rows, eval_rows, on_progress,
+                engine_name="vanilla")
 
     optim = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=r.lr)

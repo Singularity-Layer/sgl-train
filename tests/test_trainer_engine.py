@@ -1,11 +1,14 @@
 """Pure-logic tests for engine selection and the QLoRA/vanilla capability gate.
-No torch, no unsloth — resolve_engine and require_engine_for_recipe do not
-import either, by design (see runner/trainer.py).
+No torch, no unsloth — resolve_engine, require_engine_for_recipe and
+normalize_engine_mode do not import either, by design (see runner/trainer.py).
 """
+import types
+
 import pytest
 
 from runner.errors import InfraError
-from runner.trainer import require_engine_for_recipe, resolve_engine
+from runner.trainer import (_attempt_engine, normalize_engine_mode,
+                             require_engine_for_recipe, resolve_engine)
 
 
 @pytest.mark.parametrize("probe", [True, False])
@@ -57,3 +60,67 @@ def test_no_4bit_on_vanilla_is_fine():
 
 def test_no_4bit_on_unsloth_is_fine():
     require_engine_for_recipe("unsloth", False)  # must not raise
+
+
+def test_4bit_on_vanilla_error_names_the_engine_that_failed():
+    # main.py's failed-result payload has no other way to learn which engine
+    # was running when train() raised (see trainer.py's raise sites) — the
+    # engine label has to live in the message string itself.
+    with pytest.raises(InfraError, match=r"\[engine=vanilla\]"):
+        require_engine_for_recipe("vanilla", True)
+
+
+# --- normalize_engine_mode: the single SGL_ENGINE parser -------------------
+# resolve_engine and run_finetune both call this instead of each re-parsing
+# the raw env string; these cases pin its exact behavior so that contract
+# can't silently drift.
+
+@pytest.mark.parametrize("raw, expected", [
+    (None, "auto"),
+    ("", "auto"),
+    ("auto", "auto"),
+    ("vanilla", "vanilla"),
+    ("unsloth", "unsloth"),
+    (" VANILLA ", "vanilla"),
+    ("Unsloth", "unsloth"),
+    ("bogus", "bogus"),
+])
+def test_normalize_engine_mode(raw, expected):
+    assert normalize_engine_mode(raw) == expected
+
+
+def test_resolve_engine_delegates_normalization_to_normalize_engine_mode():
+    # Any raw value normalize_engine_mode maps to "vanilla" must make
+    # resolve_engine pick vanilla regardless of the probe result — if
+    # resolve_engine ever re-implemented its own parsing, this is the kind of
+    # case (whitespace/case variants) where the two could quietly disagree.
+    for raw in (" VANILLA ", "Vanilla", "vanilla"):
+        assert normalize_engine_mode(raw) == "vanilla"
+        assert resolve_engine(raw, True) == "vanilla"
+        assert resolve_engine(raw, False) == "vanilla"
+
+
+# --- _attempt_engine: exception messages carry the engine label ------------
+
+def test_attempt_engine_empty_dataset_error_names_the_engine():
+    r = types.SimpleNamespace(max_seq_len=128)
+    with pytest.raises(RuntimeError, match=r"\[engine=unsloth\] dataset produced no usable sequences"):
+        _attempt_engine(
+            load_fn=lambda spec, dtype, device: (object(), object()),
+            wrap_fn=lambda model, rec: model,
+            spec=None, r=r, dtype=None, device="cpu",
+            train_rows=[], eval_rows=[], on_progress=lambda *a, **k: None,
+            engine_name="unsloth",
+        )
+
+
+def test_attempt_engine_empty_dataset_error_names_vanilla_too():
+    r = types.SimpleNamespace(max_seq_len=128)
+    with pytest.raises(RuntimeError, match=r"\[engine=vanilla\] dataset produced no usable sequences"):
+        _attempt_engine(
+            load_fn=lambda spec, dtype, device: (object(), object()),
+            wrap_fn=lambda model, rec: model,
+            spec=None, r=r, dtype=None, device="cpu",
+            train_rows=[], eval_rows=[], on_progress=lambda *a, **k: None,
+            engine_name="vanilla",
+        )

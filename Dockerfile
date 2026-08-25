@@ -29,9 +29,13 @@ RUN pip install --no-cache-dir \
 # back to the vanilla stack above on ANY import/load/wrap failure, so this
 # block is not fatal to the image's core purpose if the pin below goes stale.
 #
-# PROVISIONAL pin, verified against PyPI metadata (not yet build-tested in
-# CI — that build is the real verifier; if `import unsloth` fails inside the
-# built image, fix this block, do NOT bump torch to chase a newer unsloth):
+# PROVISIONAL pin, verified against PyPI metadata. CI does NOT `import unsloth`
+# itself — unsloth GPU-gates at import time and CI runners have no GPU, so that
+# import would fail even on a correctly-pinned image. What CI DOES verify at
+# build time is the dependency closure below (import of everything unsloth
+# actually needs, none of which GPU-gate); the real end-to-end gate is the
+# forced SGL_ENGINE=unsloth smoke step run on real GPU hardware. If that smoke
+# step fails, fix this block, do NOT bump torch to chase a newer unsloth):
 #
 #   unsloth==2025.3.18 is the newest release whose BASE (non-extra) deps still
 #   declare `transformers!=4.47.0,>=4.46.1`, `peft!=0.11.0,>=0.7.1`,
@@ -63,13 +67,26 @@ RUN pip install --no-cache-dir --no-deps \
       "xformers==0.0.29.post1" \
       "bitsandbytes==0.45.3" \
       "torchvision==0.20.1" \
-      "tyro" \
-      "hf_transfer" \
-      "diffusers" \
+      "tyro==0.9.14" \
+      "hf_transfer==0.1.9" \
+      "diffusers==0.32.2" \
       "cut-cross-entropy==25.1.1" \
-      "pillow" \
-      "regex" \
-      "psutil"
+      "pillow==11.1.0" \
+      "regex==2024.11.6" \
+      "psutil==6.1.1"
+# ^ tyro/hf_transfer/diffusers/pillow/regex/psutil: PROVISIONAL pins, same
+#   reasoning and vintage as the unsloth pin above (versions current as of
+#   unsloth==2025.3.18's release window) — pinned so a bare `pip install`
+#   can't silently drift a transitive (e.g. a newer diffusers pulling a
+#   newer huggingface_hub) out from under the pins this file already tested.
+
+# CPU-safe closure check: proves every non-unsloth package unsloth/unsloth_zoo
+# import at runtime is actually importable in THIS image, before the smoke
+# step ever touches a GPU. Deliberately NOT `import unsloth` itself — unsloth
+# GPU-gates at import time, so that would fail in CI regardless of whether the
+# pins above are correct. The real runtime gate for unsloth itself is the
+# forced SGL_ENGINE=unsloth smoke step (GPU hardware, not this build).
+RUN python -c "import unsloth_zoo, xformers, bitsandbytes, cut_cross_entropy, diffusers, tyro"
 
 # convert_hf_to_gguf.py is pure Python and lives in the llama.cpp tree; llama-quantize
 # is a compiled binary we take from the prebuilt release rather than compiling here.

@@ -231,3 +231,30 @@ def test_infra_error_from_training_is_exit_infra_not_exit_train():
     code = execute(BASE, make_deps(rep, train=boom))
     assert code == EXIT_INFRA
     assert "CUDA is unavailable" in rep.results[-1][1]["error"]
+
+
+def test_failed_training_error_carries_the_engine_label_when_train_raised_it():
+    # main.py can't know which engine was running when train() raised — it
+    # never gets an `outcome` dict back, only the exception. trainer.py's
+    # raise sites embed "[engine=...]" in the message itself (see
+    # runner/trainer.py: require_engine_for_recipe, _load_vanilla,
+    # _save_vanilla, _attempt_engine, trainer_unsloth.save_unsloth) precisely
+    # so this string survives unmodified all the way into the failed-result
+    # payload the buyer/backend sees.
+    rep = SpyReporter()
+
+    def boom_infra(*a):
+        raise InfraError("[engine=vanilla] artifact save failed (disk?): boom")
+
+    code = execute(BASE, make_deps(rep, train=boom_infra))
+    assert code == EXIT_INFRA
+    assert "[engine=vanilla]" in rep.results[-1][1]["error"]
+
+    rep2 = SpyReporter()
+
+    def boom_generic(*a):
+        raise RuntimeError("[engine=unsloth] dataset produced no usable sequences after tokenization")
+
+    code2 = execute(BASE, make_deps(rep2, train=boom_generic))
+    assert code2 == EXIT_TRAIN
+    assert "[engine=unsloth]" in rep2.results[-1][1]["error"]
