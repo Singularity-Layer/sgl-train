@@ -50,6 +50,28 @@ def resolve_engine(env_value: str, unsloth_probe_result: bool) -> str:
     return "unsloth" if unsloth_probe_result else "vanilla"
 
 
+def unsloth_pin_ok(spec) -> bool:
+    """True iff this spec carries a pinned unsloth mirror repo+revision.
+
+    Pure, no imports (same rule as resolve_engine/require_engine_for_recipe).
+    spec.py enforces unsloth_repo/unsloth_revision as both-or-neither, so
+    checking one here would be enough, but checking both documents the
+    invariant this function actually depends on rather than spec.py's.
+
+    Why this gate exists at all: unsloth's FastLanguageModel.from_pretrained
+    silently remaps a canonical repo name (e.g. "Qwen/Qwen2.5-0.5B-Instruct")
+    to its own mirror namespace but still applies whatever revision it was
+    given — a revision that belongs to the canonical repo, not the mirror
+    (see runner/trainer_unsloth.py's load_unsloth docstring; this is exactly
+    how the live GPU smoke run failed). Without a mirror-specific pin there is
+    no revision we can hand unsloth that is guaranteed to exist in the mirror,
+    so the unsloth engine must never be attempted at all — see run_finetune's
+    'auto' and forced-'unsloth' branches, both of which check this before
+    doing anything else (before even importing unsloth).
+    """
+    return spec.unsloth_repo is not None and spec.unsloth_revision is not None
+
+
 def require_engine_for_recipe(engine: str, load_in_4bit: bool) -> None:
     """4-bit (QLoRA) training needs unsloth's bitsandbytes integration — the
     vanilla engine has no 4-bit path at all. Raise InfraError, not SpecError:
@@ -308,11 +330,34 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
             engine_name="vanilla")
     elif v == "unsloth":
         # Forced: no fallback (testing mode). Any exception — import, load, an
-        # empty-dataset RuntimeError, a wrap failure — propagates as-is.
+        # empty-dataset RuntimeError, a wrap failure — propagates as-is. But a
+        # missing mirror pin is checked BEFORE any of that: attempting the
+        # load anyway risks the silent remap-but-not-revision bug (see
+        # unsloth_pin_ok), and forcing the engine does not mean forcing that
+        # bug too — this is our capability gap, refundable, never the buyer's.
+        if not unsloth_pin_ok(spec):
+            raise InfraError(
+                "[engine=unsloth] no unsloth mirror pinned for this base model")
         engine = resolve_engine(engine_mode, True)
         model, tokenizer, train_enc, eval_batches, baseline = _attempt_engine(
             _load_unsloth, _wrap_unsloth, spec, r, dtype, device, train_rows, eval_rows, on_progress,
             engine_name="unsloth")
+    elif not unsloth_pin_ok(spec):
+        # auto, but no unsloth mirror is pinned for this base model: never
+        # attempt unsloth at all — no import, no probe, no wasted load. This
+        # is cheaper than the bring-up fallback below AND avoids the silent
+        # remap-but-not-revision bug entirely rather than triggering and then
+        # recovering from it (see unsloth_pin_ok). Nothing here touches RNG
+        # state, so — unlike _fallback_to_vanilla — there is nothing to
+        # reseed past.
+        engine_fallback_reason = "NoUnslothPin"
+        engine = resolve_engine(engine_mode, False)
+        require_engine_for_recipe(engine, r.load_in_4bit)
+        print(f"[sgl] [engine=unsloth] unsloth unavailable ({engine_fallback_reason}), "
+              f"falling back to vanilla", file=sys.stderr)
+        model, tokenizer, train_enc, eval_batches, baseline = _attempt_engine(
+            _load_vanilla, _wrap_vanilla_lora, spec, r, dtype, device, train_rows, eval_rows, on_progress,
+            engine_name="vanilla")
     else:
         # auto: the fallback try covers ONLY bring-up (import + load_unsloth +
         # the tokenization it needs) and, separately, the LoRA wrap — NOT
@@ -384,6 +429,16 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
     else:
         _save_vanilla(model, tokenizer, out_dirs)
 
+    # Honesty: which repo+revision ACTUALLY trained. vanilla trains spec.hf_repo
+    # @ spec.hf_revision directly; unsloth trains the pinned MIRROR instead (see
+    # unsloth_pin_ok / trainer_unsloth.load_unsloth) — the report must say so
+    # rather than implying the canonical repo was what produced these weights.
+    if engine == "unsloth":
+        trained_repo, trained_revision = spec.unsloth_repo, spec.unsloth_revision
+    else:
+        trained_repo, trained_revision = spec.hf_repo, spec.hf_revision
+
     return {"baseline": baseline, "final": final, "steps": step, "seed": r.seed,
             "device": device, "dtype": actual_dtype,
-            "engine": engine, "engine_fallback_reason": engine_fallback_reason}
+            "engine": engine, "engine_fallback_reason": engine_fallback_reason,
+            "trained_repo": trained_repo, "trained_revision": trained_revision}

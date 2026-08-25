@@ -131,6 +131,11 @@ def execute(raw_spec: dict, deps: Deps) -> int:
         "dtype": outcome.get("dtype"),
         "engine": outcome.get("engine"),
         "engine_fallback_reason": outcome.get("engine_fallback_reason"),
+        # The repo+revision that ACTUALLY trained — with unsloth this is the
+        # pinned MIRROR, not base_model/base_revision above. See
+        # runner/trainer.py's run_finetune return value.
+        "trained_repo": outcome.get("trained_repo"),
+        "trained_revision": outcome.get("trained_revision"),
     }
 
     try:

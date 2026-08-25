@@ -24,12 +24,26 @@ def load_unsloth(spec, dtype_hint):
     makes. dtype_hint is accepted for symmetry with the vanilla loader but
     unsloth is left to auto-select (dtype=None is its own "autodetect" value,
     matching what the vanilla loader would have picked on this box anyway).
+
+    model_name/revision are spec.unsloth_repo/spec.unsloth_revision — NEVER
+    spec.hf_repo/spec.hf_revision. Live GPU smoke (2026-08-25) proved
+    FastLanguageModel.from_pretrained SILENTLY remaps a canonical repo name
+    (e.g. "Qwen/Qwen2.5-0.5B-Instruct") to unsloth's own mirror namespace
+    ("unsloth/Qwen2.5-0.5B-Instruct") but still applies whatever revision it
+    was handed — and that sha is the CANONICAL repo's, which does not exist in
+    the mirror repo, so the load failed with "AutoConfig error: Unrecognized
+    model in unsloth/Qwen2.5-0.5B-Instruct". Passing the mirror's OWN
+    repo+revision (validated as a matched pair in spec.py, and required by
+    trainer.py's unsloth_pin_ok before this function is ever called) makes
+    unsloth's internal remap a no-op: the name it resolves to is the name we
+    already gave it, and the revision is that mirror's own sha — never a
+    surprise substitution.
     """
     from unsloth import FastLanguageModel
 
     model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=spec.hf_repo,
-        revision=spec.hf_revision,
+        model_name=spec.unsloth_repo,
+        revision=spec.unsloth_revision,
         max_seq_length=spec.recipe.max_seq_len,
         load_in_4bit=spec.recipe.load_in_4bit,
         dtype=None,

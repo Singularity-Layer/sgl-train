@@ -38,7 +38,8 @@ def make_deps(rep, **over):
         train=lambda s, tr, ev, d, cb: {"baseline": {"eval_loss": 2.0, "perplexity": 7.4, "eval_tokens": 10},
                                         "final": {"eval_loss": 1.0, "perplexity": 2.7, "eval_tokens": 10},
                                         "steps": 5, "seed": 1,
-                                        "device": "cuda", "dtype": "torch.bfloat16"},
+                                        "device": "cuda", "dtype": "torch.bfloat16",
+                                        "trained_repo": "Q/M", "trained_revision": "sha"},
         convert=lambda m, g, q: None,
         upload=lambda url, path: True,
         reporter_factory=lambda spec: rep,
@@ -60,6 +61,8 @@ def test_happy_path_reports_completed_with_both_scores():
     assert payload["seed"] == 1
     assert payload["device"] == "cuda"
     assert payload["dtype"] == "torch.bfloat16"
+    assert payload["trained_repo"] == "Q/M"
+    assert payload["trained_revision"] == "sha"
 
 
 def test_bad_spec_exits_without_touching_the_gpu():
@@ -207,19 +210,49 @@ def test_report_carries_engine_and_fallback_reason_when_present():
         "baseline": {"eval_loss": 2.0, "perplexity": 7.4, "eval_tokens": 10},
         "final": {"eval_loss": 1.0, "perplexity": 2.7, "eval_tokens": 10},
         "steps": 5, "seed": 1, "device": "cuda", "dtype": "torch.bfloat16",
-        "engine": "vanilla", "engine_fallback_reason": "ImportError"}
+        "engine": "vanilla", "engine_fallback_reason": "ImportError",
+        "trained_repo": "Q/M", "trained_revision": "sha"}
     assert execute(BASE, make_deps(rep, train=engine_train)) == EXIT_OK
     payload = rep.results[-1][1]
     assert payload["engine"] == "vanilla"
     assert payload["engine_fallback_reason"] == "ImportError"
+    assert payload["trained_repo"] == "Q/M"
+    assert payload["trained_revision"] == "sha"
 
 
 def test_report_engine_fields_are_none_when_train_outcome_omits_them():
     rep = SpyReporter()
-    assert execute(BASE, make_deps(rep)) == EXIT_OK
+    bare_train = lambda s, tr, ev, d, cb: {
+        "baseline": {"eval_loss": 2.0, "perplexity": 7.4, "eval_tokens": 10},
+        "final": {"eval_loss": 1.0, "perplexity": 2.7, "eval_tokens": 10},
+        "steps": 5, "seed": 1}
+    assert execute(BASE, make_deps(rep, train=bare_train)) == EXIT_OK
     payload = rep.results[-1][1]
     assert payload["engine"] is None
     assert payload["engine_fallback_reason"] is None
+    assert payload["trained_repo"] is None
+    assert payload["trained_revision"] is None
+
+
+def test_report_carries_trained_repo_and_revision_for_the_unsloth_mirror():
+    # Honesty guarantee: when the unsloth engine ran, the weights that
+    # actually trained are the PINNED MIRROR's, not base_model/base_revision
+    # in the report (spec.hf_repo/spec.hf_revision) — see
+    # runner/trainer.py's run_finetune return value.
+    rep = SpyReporter()
+    unsloth_train = lambda s, tr, ev, d, cb: {
+        "baseline": {"eval_loss": 2.0, "perplexity": 7.4, "eval_tokens": 10},
+        "final": {"eval_loss": 1.0, "perplexity": 2.7, "eval_tokens": 10},
+        "steps": 5, "seed": 1, "device": "cuda", "dtype": "torch.bfloat16",
+        "engine": "unsloth", "engine_fallback_reason": None,
+        "trained_repo": "unsloth/M", "trained_revision": "unsloth-sha"}
+    assert execute(BASE, make_deps(rep, train=unsloth_train)) == EXIT_OK
+    payload = rep.results[-1][1]
+    assert payload["base_model"] == "Q/M"          # unchanged: still the canonical spec repo
+    assert payload["base_revision"] == "sha"
+    assert payload["engine"] == "unsloth"
+    assert payload["trained_repo"] == "unsloth/M"  # what ACTUALLY trained
+    assert payload["trained_revision"] == "unsloth-sha"
 
 
 def test_infra_error_from_training_is_exit_infra_not_exit_train():

@@ -8,7 +8,7 @@ import pytest
 
 from runner.errors import InfraError
 from runner.trainer import (_attempt_engine, _model_dtype, normalize_engine_mode,
-                             require_engine_for_recipe, resolve_engine)
+                             require_engine_for_recipe, resolve_engine, unsloth_pin_ok)
 
 
 @pytest.mark.parametrize("probe", [True, False])
@@ -146,6 +146,38 @@ def test_model_dtype_reads_off_first_parameter():
 
     model = _FakeModel(["torch.bfloat16", "torch.float32"])
     assert _model_dtype(model) == "torch.bfloat16"
+
+
+# --- unsloth_pin_ok: the unsloth engine's mirror-pin gate -------------------
+# See runner/trainer_unsloth.py's load_unsloth docstring for why the unsloth
+# engine must never run without this pin: unsloth silently remaps a canonical
+# repo name to its own mirror namespace but still applies whatever revision
+# it was given, and that revision belongs to the canonical repo, not the
+# mirror.
+
+def test_unsloth_pin_ok_true_when_both_fields_present():
+    spec = types.SimpleNamespace(
+        unsloth_repo="unsloth/Qwen2.5-0.5B-Instruct",
+        unsloth_revision="ae616882a38b36759fc46ac3fd6769498833b913")
+    assert unsloth_pin_ok(spec) is True
+
+
+def test_unsloth_pin_ok_false_when_both_fields_absent():
+    spec = types.SimpleNamespace(unsloth_repo=None, unsloth_revision=None)
+    assert unsloth_pin_ok(spec) is False
+
+
+@pytest.mark.parametrize("repo, revision", [
+    ("unsloth/Qwen2.5-0.5B-Instruct", None),
+    (None, "ae616882a38b36759fc46ac3fd6769498833b913"),
+])
+def test_unsloth_pin_ok_false_when_only_one_field_present(repo, revision):
+    # spec.py's _optional_pair should never let this state reach here in
+    # practice (both-or-neither is enforced at parse time), but unsloth_pin_ok
+    # checks its own actual dependency (both fields truthy) rather than
+    # trusting that invariant blindly.
+    spec = types.SimpleNamespace(unsloth_repo=repo, unsloth_revision=revision)
+    assert unsloth_pin_ok(spec) is False
 
 
 def test_model_dtype_uses_str_of_the_dtype_object_not_just_first_field():

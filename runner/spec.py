@@ -53,6 +53,8 @@ class JobSpec:
     kind: str
     hf_repo: str
     hf_revision: str
+    unsloth_repo: str | None
+    unsloth_revision: str | None
     dataset_url: str
     quantize: str
     progress_url: str
@@ -66,6 +68,23 @@ def _req(d: dict, key: str, where: str) -> object:
     if key not in d or d[key] in (None, ""):
         raise SpecError(f"{where}: missing required field '{key}'")
     return d[key]
+
+
+def _optional_pair(d: dict, key_a: str, key_b: str, where: str) -> tuple[str | None, str | None]:
+    """Both-or-neither optional string pair, e.g. unsloth_repo/unsloth_revision.
+
+    Presence uses the same emptiness rule as _req (missing key or "" counts as
+    absent). If exactly one of the pair is present the spec is unusable — a
+    repo with no pinned revision (or vice versa) is not reproducible — so that
+    raises SpecError rather than silently picking a default.
+    """
+    a_present = d.get(key_a) not in (None, "")
+    b_present = d.get(key_b) not in (None, "")
+    if a_present != b_present:
+        raise SpecError(f"{where}: '{key_a}' and '{key_b}' must both be present or both be absent")
+    if not a_present:
+        return None, None
+    return str(d[key_a]), str(d[key_b])
 
 
 def _check_url(name: str, value: str) -> None:
@@ -153,6 +172,17 @@ def parse_spec(raw: dict) -> JobSpec:
     # Fail-closed: an unpinned model means an unreproducible run, which means the
     # result can never be verified. Mirrors the sha256 pin on GGUF downloads.
     hf_revision = str(_req(base, "revision", "base_model"))
+    # OPTIONAL: the unsloth engine's own mirror pin (e.g.
+    # "unsloth/Qwen2.5-0.5B-Instruct" @ its own sha, NOT hf_repo/hf_revision's
+    # sha). unsloth's FastLanguageModel.from_pretrained silently remaps a
+    # canonical repo name to its mirror namespace but still applies whatever
+    # revision it was given — that revision belongs to the canonical repo, not
+    # the mirror, so the mirror lookup 404s (see runner/trainer_unsloth.py).
+    # Handing unsloth its own mirror repo+revision directly makes that remap a
+    # no-op. Without this pin the unsloth engine must never be attempted (see
+    # runner/trainer.py: unsloth_pin_ok).
+    unsloth_repo, unsloth_revision = _optional_pair(
+        base, "unsloth_repo", "unsloth_revision", "base_model")
 
     raw_recipe = raw.get("recipe") or {}
     if not isinstance(raw_recipe, dict):
@@ -204,6 +234,8 @@ def parse_spec(raw: dict) -> JobSpec:
         kind=kind,
         hf_repo=hf_repo,
         hf_revision=hf_revision,
+        unsloth_repo=unsloth_repo,
+        unsloth_revision=unsloth_revision,
         dataset_url=dataset_url,
         quantize=quantize,
         progress_url=progress_url,

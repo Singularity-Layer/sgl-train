@@ -132,3 +132,50 @@ def test_load_in_4bit_accepts_explicit_false():
 def test_load_in_4bit_rejects_non_boolean_values(garbage):
     with pytest.raises(SpecError, match="load_in_4bit"):
         parse_spec({**BASE, "recipe": {**BASE["recipe"], "load_in_4bit": garbage}})
+
+
+# --- unsloth_repo/unsloth_revision: optional both-or-neither mirror pin -----
+# See runner/trainer_unsloth.py: unsloth's from_pretrained silently remaps a
+# canonical repo name to its own mirror namespace but keeps whatever revision
+# it was given, which belongs to the canonical repo, not the mirror. These
+# two fields let a caller pin the MIRROR's own repo+revision so trainer.py's
+# unsloth_pin_ok can gate the unsloth engine on that pin actually existing.
+
+def test_unsloth_mirror_pin_absent_by_default():
+    s = parse_spec(BASE)
+    assert s.unsloth_repo is None
+    assert s.unsloth_revision is None
+
+
+def test_unsloth_mirror_pin_parses_when_both_present():
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_repo": "unsloth/Qwen2.5-0.5B-Instruct",
+        "unsloth_revision": "ae616882a38b36759fc46ac3fd6769498833b913",
+    }}
+    s = parse_spec(raw)
+    assert s.unsloth_repo == "unsloth/Qwen2.5-0.5B-Instruct"
+    assert s.unsloth_revision == "ae616882a38b36759fc46ac3fd6769498833b913"
+
+
+def test_unsloth_mirror_pin_rejects_repo_without_revision():
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"], "unsloth_repo": "unsloth/Qwen2.5-0.5B-Instruct"}}
+    with pytest.raises(SpecError, match="unsloth_repo.*unsloth_revision"):
+        parse_spec(raw)
+
+
+def test_unsloth_mirror_pin_rejects_revision_without_repo():
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"], "unsloth_revision": "ae616882a38b36759fc46ac3fd6769498833b913"}}
+    with pytest.raises(SpecError, match="unsloth_repo.*unsloth_revision"):
+        parse_spec(raw)
+
+
+@pytest.mark.parametrize("empty", ["", None])
+def test_unsloth_mirror_pin_treats_empty_string_as_absent(empty):
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"], "unsloth_repo": empty, "unsloth_revision": empty}}
+    s = parse_spec(raw)
+    assert s.unsloth_repo is None
+    assert s.unsloth_revision is None

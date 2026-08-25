@@ -40,8 +40,43 @@ regardless of which one ran:
 | `unsloth` | force unsloth; a failure raises instead of falling back (testing mode). |
 
 The report includes `engine` (`"unsloth"` or `"vanilla"`) and, when a fallback
-happened, `engine_fallback_reason` (the exception class name only — never
-buyer-facing content).
+happened, `engine_fallback_reason` (the exception class name only, or the
+literal string `"NoUnslothPin"` — see below — never buyer-facing content). It
+also includes `trained_repo`/`trained_revision`: the repo+revision that
+*actually* trained, which for the unsloth engine is the pinned mirror below,
+not `base_model`/`base_revision`.
+
+### The unsloth mirror pin (`base_model.unsloth_repo` / `unsloth_revision`)
+
+unsloth's `FastLanguageModel.from_pretrained` silently **remaps** a canonical
+repo name (e.g. `Qwen/Qwen2.5-0.5B-Instruct`) to its own mirror namespace
+(e.g. `unsloth/Qwen2.5-0.5B-Instruct`) — but it still applies whatever
+`revision` it was given, and that revision is the *canonical* repo's sha, not
+the mirror's. The mirror almost never has a commit at that exact sha, so the
+load fails (`AutoConfig error: Unrecognized model in
+unsloth/Qwen2.5-0.5B-Instruct`) — or, worse, could silently resolve to
+*whatever the mirror's default branch happens to be*, which is not
+reproducible and breaks this image's honesty guarantee.
+
+To use the unsloth engine, a spec must pin the mirror explicitly with two
+**optional, both-or-neither** `base_model` fields:
+
+```json
+"base_model": {
+  "hf_repo": "Qwen/Qwen2.5-0.5B-Instruct",
+  "revision": "<canonical repo sha>",
+  "unsloth_repo": "unsloth/Qwen2.5-0.5B-Instruct",
+  "unsloth_revision": "<the MIRROR repo's own sha>"
+}
+```
+
+Supplying only one of the pair is a `SpecError`. If neither is supplied, the
+unsloth engine is simply never attempted:
+
+- `SGL_ENGINE=auto` with no mirror pin → skips straight to vanilla, no
+  unsloth import at all, `engine_fallback_reason: "NoUnslothPin"`.
+- `SGL_ENGINE=unsloth` (forced) with no mirror pin → `InfraError` → exit `6`
+  (refundable: this is our capability gap, not the buyer's).
 
 ### QLoRA (`recipe.load_in_4bit`)
 

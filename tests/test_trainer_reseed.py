@@ -39,11 +39,18 @@ import pytest
 
 from runner import trainer
 from runner import trainer_unsloth
+from runner.errors import InfraError
 from runner.spec import parse_spec
 
 RAW_SPEC = {
     "run_id": "r1", "kind": "finetune",
-    "base_model": {"hf_repo": "Q/M", "revision": "sha"},
+    # A pinned unsloth mirror IS present here — these tests exercise the
+    # bring-up/wrap exception-fallback paths, which only run once
+    # unsloth_pin_ok(spec) is true (see runner/trainer.py). The no-pin path
+    # (skip unsloth entirely, reason='NoUnslothPin') has its own tests below,
+    # built off a spec that omits these two fields.
+    "base_model": {"hf_repo": "Q/M", "revision": "sha",
+                   "unsloth_repo": "unsloth/M", "unsloth_revision": "unsloth-sha"},
     "dataset_url": "https://d.invalid/x.jsonl", "quantize": "Q4_K_M",
     "progress_url": "https://p.invalid", "result_url": "https://res.invalid",
     "token": "t",
@@ -52,9 +59,18 @@ RAW_SPEC = {
     "recipe": {"seed": 42, "epochs": 1, "eval_split": 0.5, "batch_size": 1},
 }
 
+RAW_SPEC_NO_UNSLOTH_PIN = {
+    **RAW_SPEC,
+    "base_model": {"hf_repo": "Q/M", "revision": "sha"},
+}
+
 
 def _spec():
     return parse_spec(RAW_SPEC)
+
+
+def _spec_no_pin():
+    return parse_spec(RAW_SPEC_NO_UNSLOTH_PIN)
 
 
 class _FakeCuda:
@@ -272,3 +288,67 @@ def test_success_path_seeds_exactly_once(monkeypatch, fake_torch):
     assert result["engine"] == "unsloth"
     assert result["engine_fallback_reason"] is None
     assert result["dtype"] == "torch.bfloat16"
+    assert result["trained_repo"] == spec.unsloth_repo
+    assert result["trained_revision"] == spec.unsloth_revision
+
+
+# --- no unsloth mirror pinned: never attempt unsloth at all -----------------
+
+def test_auto_with_no_unsloth_pin_never_attempts_unsloth_and_goes_straight_to_vanilla(
+        monkeypatch, fake_torch):
+    spec = _spec_no_pin()
+    assert spec.unsloth_repo is None and spec.unsloth_revision is None
+
+    seed_calls = []
+    monkeypatch.setattr(trainer, "_set_all_seeds", lambda seed: seed_calls.append(seed))
+    monkeypatch.setattr(trainer, "_evaluate", lambda model, batches: {
+        "eval_loss": 1.0, "perplexity": 2.7, "eval_tokens": 10})
+    monkeypatch.setattr(trainer, "_save_vanilla", lambda model, tokenizer, out_dirs: None)
+
+    # _load_and_encode is the unsloth bring-up seam (import + load_unsloth) —
+    # if the no-pin gate is doing its job this must never be called at all.
+    probe_calls = []
+
+    def fake_load_and_encode(load_fn, spec_, r, dtype, device, train_rows, eval_rows, engine_name):
+        probe_calls.append(engine_name)
+        raise AssertionError("must not attempt unsloth bring-up when no mirror is pinned")
+    monkeypatch.setattr(trainer, "_load_and_encode", fake_load_and_encode)
+
+    attempt_calls = []
+
+    def fake_attempt(load_fn, wrap_fn, spec_, r, dtype, device, train_rows, eval_rows,
+                      on_progress, engine_name):
+        attempt_calls.append(engine_name)
+        assert engine_name == "vanilla"
+        return _FakeModel(), object(), [], [], {
+            "eval_loss": 2.0, "perplexity": 7.4, "eval_tokens": 10}
+    monkeypatch.setattr(trainer, "_attempt_engine", fake_attempt)
+
+    result = trainer.run_finetune(
+        spec, [], [], {"adapter_dir": "/x", "merged_dir": "/y"}, lambda *a, **k: None)
+
+    assert probe_calls == []  # the unsloth probe was NEVER called
+    assert attempt_calls == ["vanilla"]
+    # Nothing was discarded (unsloth was never touched), so no reseed — just
+    # the one seed call at the top of run_finetune.
+    assert seed_calls == [spec.recipe.seed]
+    assert result["engine"] == "vanilla"
+    assert result["engine_fallback_reason"] == "NoUnslothPin"
+    assert result["trained_repo"] == spec.hf_repo
+    assert result["trained_revision"] == spec.hf_revision
+
+
+def test_forced_unsloth_with_no_pin_raises_infra_error_before_any_attempt(
+        monkeypatch, fake_torch):
+    monkeypatch.setenv("SGL_ENGINE", "unsloth")
+    spec = _spec_no_pin()
+
+    monkeypatch.setattr(trainer, "_set_all_seeds", lambda seed: None)
+
+    def fake_attempt(*a, **k):
+        raise AssertionError("must not attempt an unsloth load without a mirror pin")
+    monkeypatch.setattr(trainer, "_attempt_engine", fake_attempt)
+
+    with pytest.raises(InfraError, match=r"\[engine=unsloth\] no unsloth mirror pinned"):
+        trainer.run_finetune(
+            spec, [], [], {"adapter_dir": "/x", "merged_dir": "/y"}, lambda *a, **k: None)
