@@ -201,6 +201,27 @@ def test_non_utf8_dataset_bytes_are_a_data_fault_not_an_infra_fault():
     assert "dataset" in rep.results[-1][1]["error"]
 
 
+def test_report_carries_engine_and_fallback_reason_when_present():
+    rep = SpyReporter()
+    engine_train = lambda s, tr, ev, d, cb: {
+        "baseline": {"eval_loss": 2.0, "perplexity": 7.4, "eval_tokens": 10},
+        "final": {"eval_loss": 1.0, "perplexity": 2.7, "eval_tokens": 10},
+        "steps": 5, "seed": 1, "device": "cuda", "dtype": "torch.bfloat16",
+        "engine": "vanilla", "engine_fallback_reason": "ImportError"}
+    assert execute(BASE, make_deps(rep, train=engine_train)) == EXIT_OK
+    payload = rep.results[-1][1]
+    assert payload["engine"] == "vanilla"
+    assert payload["engine_fallback_reason"] == "ImportError"
+
+
+def test_report_engine_fields_are_none_when_train_outcome_omits_them():
+    rep = SpyReporter()
+    assert execute(BASE, make_deps(rep)) == EXIT_OK
+    payload = rep.results[-1][1]
+    assert payload["engine"] is None
+    assert payload["engine_fallback_reason"] is None
+
+
 def test_infra_error_from_training_is_exit_infra_not_exit_train():
     rep = SpyReporter()
 

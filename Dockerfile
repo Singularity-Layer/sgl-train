@@ -24,6 +24,53 @@ RUN pip install --no-cache-dir \
       "protobuf==5.28.3" \
       "gguf==0.10.0"
 
+# --- Unsloth engine (optional) -----------------------------------------------
+# trainer.py TRIES this at runtime (SGL_ENGINE=auto, the default) and falls
+# back to the vanilla stack above on ANY import/load/wrap failure, so this
+# block is not fatal to the image's core purpose if the pin below goes stale.
+#
+# PROVISIONAL pin, verified against PyPI metadata (not yet build-tested in
+# CI — that build is the real verifier; if `import unsloth` fails inside the
+# built image, fix this block, do NOT bump torch to chase a newer unsloth):
+#
+#   unsloth==2025.3.18 is the newest release whose BASE (non-extra) deps still
+#   declare `transformers!=4.47.0,>=4.46.1`, `peft!=0.11.0,>=0.7.1`,
+#   `datasets>=2.16.0`, `trl>=0.7.9,<=0.15.2`, `accelerate>=0.34.1` — all
+#   satisfied by the exact pins above. From unsloth==2025.5.1 onward the
+#   requirement jumps to `transformers==4.51.3` (exact) and later
+#   `datasets>=3.4.1`, which would force-upgrade the whole vanilla stack this
+#   Dockerfile has already pinned and tested; staying on 2025.3.18 keeps the
+#   vanilla engine's pins untouched, matching this file's existing "never let
+#   the converter's deps clobber the main env" philosophy (see convert-venv
+#   below) — same reasoning, applied to unsloth instead of llama.cpp's convert
+#   script.
+#
+#   unsloth's own `cu124-torch251` extra (an official, versioned install
+#   target for exactly this torch+CUDA combo) resolves xformers==0.0.29.post1,
+#   which itself pins `torch==2.5.1` exactly — independent confirmation this
+#   unsloth vintage targets our exact base image's torch build.
+#
+#   Installed with --no-deps: at this vintage, unsloth AND unsloth_zoo both
+#   still declare `protobuf<4.0.0`, which conflicts with protobuf==5.28.3
+#   pinned above for the main training stack (a real requirement, not just an
+#   unsloth artifact — see convert.py's docstring). --no-deps skips that
+#   resolver conflict; every other package unsloth/unsloth_zoo actually import
+#   at runtime is installed explicitly below instead of left to pip's resolver.
+RUN pip install --no-cache-dir --no-deps \
+      "unsloth==2025.3.18" \
+      "unsloth_zoo==2025.3.14" \
+ && pip install --no-cache-dir \
+      "xformers==0.0.29.post1" \
+      "bitsandbytes==0.45.3" \
+      "torchvision==0.20.1" \
+      "tyro" \
+      "hf_transfer" \
+      "diffusers" \
+      "cut-cross-entropy==25.1.1" \
+      "pillow" \
+      "regex" \
+      "psutil"
+
 # convert_hf_to_gguf.py is pure Python and lives in the llama.cpp tree; llama-quantize
 # is a compiled binary we take from the prebuilt release rather than compiling here.
 RUN git clone --depth 1 --branch ${LLAMA_CPP_TAG} \

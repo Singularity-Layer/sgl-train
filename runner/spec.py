@@ -44,6 +44,7 @@ class Recipe:
     grad_accum: int
     eval_split: float
     seed: int
+    load_in_4bit: bool
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,19 @@ def _check_url(name: str, value: str) -> None:
         raise SpecError(f"spec: {name} must not target a private or local address")
 
 
+def _parse_bool_flag(name: str, value: object) -> bool:
+    """Strict boolean parse: only actual JSON true/false survive.
+
+    isinstance(x, bool) — not truthiness — is deliberate: JSON's booleans decode
+    to Python bool, so "true"/1/"yes" etc. are all rejected rather than silently
+    coerced. A QLoRA flag is a training-shape decision (4-bit or not); guessing
+    wrong from a loosely-typed value is worse than failing the spec outright.
+    """
+    if isinstance(value, bool):
+        return value
+    raise SpecError(f"recipe: '{name}' must be a boolean (true/false), got {value!r}")
+
+
 def _clamp(name: str, value: object) -> float | int:
     try:
         num = float(value)
@@ -160,6 +174,7 @@ def parse_spec(raw: dict) -> JobSpec:
         grad_accum=_clamp("grad_accum", raw_recipe.get("grad_accum", 4)),
         eval_split=_clamp("eval_split", raw_recipe.get("eval_split", 0.1)),
         seed=seed,
+        load_in_4bit=_parse_bool_flag("load_in_4bit", raw_recipe.get("load_in_4bit", False)),
     )
 
     artifact_urls = raw.get("artifact_urls") or {}

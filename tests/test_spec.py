@@ -111,3 +111,24 @@ def test_accepts_https_to_loopback_ip_with_local_urls_allowed(monkeypatch):
     monkeypatch.setenv("SGL_ALLOW_LOCAL_URLS", "1")
     s = parse_spec({**BASE, "dataset_url": "https://127.0.0.1/x"})
     assert s.dataset_url == "https://127.0.0.1/x"
+
+
+def test_load_in_4bit_defaults_to_false_when_absent():
+    s = parse_spec(BASE)
+    assert s.recipe.load_in_4bit is False
+
+
+def test_load_in_4bit_accepts_explicit_true():
+    s = parse_spec({**BASE, "recipe": {**BASE["recipe"], "load_in_4bit": True}})
+    assert s.recipe.load_in_4bit is True
+
+
+def test_load_in_4bit_accepts_explicit_false():
+    s = parse_spec({**BASE, "recipe": {**BASE["recipe"], "load_in_4bit": False}})
+    assert s.recipe.load_in_4bit is False
+
+
+@pytest.mark.parametrize("garbage", ["true", "false", 1, 0, "1", None, [], {}])
+def test_load_in_4bit_rejects_non_boolean_values(garbage):
+    with pytest.raises(SpecError, match="load_in_4bit"):
+        parse_spec({**BASE, "recipe": {**BASE["recipe"], "load_in_4bit": garbage}})

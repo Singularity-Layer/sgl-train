@@ -129,6 +129,8 @@ def execute(raw_spec: dict, deps: Deps) -> int:
         "gguf_error": gguf_error,
         "device": outcome.get("device"),
         "dtype": outcome.get("dtype"),
+        "engine": outcome.get("engine"),
+        "engine_fallback_reason": outcome.get("engine_fallback_reason"),
     }
 
     try:

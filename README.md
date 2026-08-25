@@ -21,6 +21,37 @@ docker run --gpus all \
 `spec.json` shape: see `runner/spec.py`. `base_model.revision` is required — an
 unpinned model cannot be reproduced, and an unreproducible run cannot be verified.
 
+## Engines
+
+Two training engines share the same load → baseline_eval → wrap-with-LoRA →
+train → eval → save pipeline, so baseline/final eval numbers are comparable
+regardless of which one ran:
+
+- **vanilla** — plain `transformers` + `peft`. Always available; no 4-bit.
+- **unsloth** — faster kernels, and the only engine that supports QLoRA
+  (`recipe.load_in_4bit`).
+
+`SGL_ENGINE` selects which one runs (default `auto`):
+
+| `SGL_ENGINE` | behavior |
+|---|---|
+| `auto` (default) | try loading + wrapping via unsloth; ANY failure (import, model load, LoRA wrap) falls back to the vanilla path automatically. The engine is locked in once training starts — no switching mid-run. |
+| `vanilla` | skip the unsloth attempt entirely. |
+| `unsloth` | force unsloth; a failure raises instead of falling back (testing mode). |
+
+The report includes `engine` (`"unsloth"` or `"vanilla"`) and, when a fallback
+happened, `engine_fallback_reason` (the exception class name only — never
+buyer-facing content).
+
+### QLoRA (`recipe.load_in_4bit`)
+
+`recipe.load_in_4bit` (default `false`) requests 4-bit (QLoRA) training. It's
+strict-parsed: only JSON `true`/`false` are accepted, anything else is a
+`SpecError`. The vanilla engine cannot do 4-bit — if `load_in_4bit` is `true`
+and the run resolves to vanilla (unsloth unavailable in `auto`, or `vanilla`
+forced explicitly), the run raises `InfraError` and exits `6` (refundable:
+this is a capability gap on our box, never the buyer's fault).
+
 ## Exit codes
 
 | code | meaning | refundable? |
@@ -39,3 +70,4 @@ unpinned model cannot be reproduced, and an unreproducible run cannot be verifie
 - `SGL_ALLOW_CPU=1` — a local-testing override that lets `run_finetune` proceed
   without a GPU. Never set this in production; without it, a box with no CUDA
   raises `InfraError` (exit 6) instead of silently training on CPU.
+- `SGL_ENGINE` — `auto` (default) / `vanilla` / `unsloth`. See "Engines" above.
