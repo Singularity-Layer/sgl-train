@@ -10,6 +10,7 @@ comparable.
 from __future__ import annotations
 
 import os
+import shutil
 
 from .errors import InfraError
 
@@ -82,5 +83,13 @@ def save_unsloth(model, tokenizer, out_dirs, load_in_4bit) -> None:
             merged = model.merge_and_unload()
             merged.save_pretrained(out_dirs["merged_dir"], safe_serialization=True)
             tokenizer.save_pretrained(out_dirs["merged_dir"])
-    except OSError as e:
-        raise InfraError(f"[engine=unsloth] artifact save failed (disk?): {e}") from e
+    except InfraError:
+        raise
+    except Exception as e:
+        # Training already succeeded and delivered the compute by the time we
+        # get here — ANY save-stage exception (disk, a dequant/merge failure,
+        # a library bug) is our-side infrastructure, not the buyer's data or
+        # recipe. Never leave a half-written merged_dir for a retry to tar up
+        # as if it were a complete artifact.
+        shutil.rmtree(out_dirs["merged_dir"], ignore_errors=True)
+        raise InfraError(f"[engine=unsloth] artifact save failed: {e}") from e

@@ -7,7 +7,7 @@ import types
 import pytest
 
 from runner.errors import InfraError
-from runner.trainer import (_attempt_engine, normalize_engine_mode,
+from runner.trainer import (_attempt_engine, _model_dtype, normalize_engine_mode,
                              require_engine_for_recipe, resolve_engine)
 
 
@@ -124,3 +124,42 @@ def test_attempt_engine_empty_dataset_error_names_vanilla_too():
             train_rows=[], eval_rows=[], on_progress=lambda *a, **k: None,
             engine_name="vanilla",
         )
+
+
+# --- _model_dtype: report the model's REAL dtype, not the vanilla heuristic ---
+# The unsloth loader is handed dtype=None and auto-picks its own, so the
+# heuristic `dtype` computed in run_finetune before either engine ran can be
+# flat wrong for that engine. _model_dtype reads the truth straight off a real
+# parameter instead, for both engines.
+
+def test_model_dtype_reads_off_first_parameter():
+    class _Param:
+        def __init__(self, dtype):
+            self.dtype = dtype
+
+    class _FakeModel:
+        def __init__(self, dtypes):
+            self._dtypes = dtypes
+
+        def parameters(self):
+            return iter(_Param(d) for d in self._dtypes)
+
+    model = _FakeModel(["torch.bfloat16", "torch.float32"])
+    assert _model_dtype(model) == "torch.bfloat16"
+
+
+def test_model_dtype_uses_str_of_the_dtype_object_not_just_first_field():
+    # str(dtype) is what gets reported, not repr or some other stringification
+    # — pin that _model_dtype doesn't do anything fancier than str().
+    class _WeirdDtype:
+        def __str__(self):
+            return "torch.float16"
+
+    class _Param:
+        dtype = _WeirdDtype()
+
+    class _FakeModel:
+        def parameters(self):
+            return iter([_Param()])
+
+    assert _model_dtype(_FakeModel()) == "torch.float16"

@@ -10,6 +10,7 @@ no unsloth installed either.
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 
 from .errors import InfraError
@@ -122,6 +123,17 @@ def _batched(tokenizer, encoded, batch_size, device):
         yield ids.to(device), attn.to(device)
 
 
+def _model_dtype(model) -> str:
+    """What the model ACTUALLY loaded in, read straight off a real parameter —
+    not the heuristic `dtype` computed before either engine ran. The vanilla
+    loader is handed that heuristic and honors it, but the unsloth loader is
+    given dtype=None (unsloth auto-picks), so the heuristic can be a flat lie
+    for that engine. One shared helper, called after load for BOTH engines,
+    so the reported value is never wrong for either one.
+    """
+    return str(next(model.parameters()).dtype)
+
+
 def _load_vanilla(spec, dtype, device):
     from transformers import AutoModelForCausalLM, AutoTokenizer
 
@@ -150,8 +162,11 @@ def _wrap_vanilla_lora(model, r):
 
 def _save_vanilla(model, tokenizer, out_dirs) -> None:
     # Training-loop failures above stay EXIT_TRAIN — they're a fact about the run.
-    # A save-time OSError (disk full, read-only fs) is our infrastructure, not the
-    # buyer's data or recipe, so it converts to InfraError -> EXIT_INFRA (refundable).
+    # By the time we get here, training already succeeded and the compute was
+    # delivered; ANY exception in this stage (disk full, a merge OOM, a
+    # library bug, whatever) is our-side infrastructure, never the buyer's
+    # data or recipe, so it always converts to InfraError -> EXIT_INFRA
+    # (refundable) — not just OSError.
     try:
         os.makedirs(out_dirs["adapter_dir"], exist_ok=True)
         model.save_pretrained(out_dirs["adapter_dir"])
@@ -161,8 +176,13 @@ def _save_vanilla(model, tokenizer, out_dirs) -> None:
         os.makedirs(out_dirs["merged_dir"], exist_ok=True)
         merged.save_pretrained(out_dirs["merged_dir"], safe_serialization=True)
         tokenizer.save_pretrained(out_dirs["merged_dir"])
-    except OSError as e:
-        raise InfraError(f"[engine=vanilla] artifact save failed (disk?): {e}") from e
+    except InfraError:
+        raise
+    except Exception as e:
+        # Best-effort: never leave a half-written merged_dir for a retry to
+        # tar up as if it were a complete artifact.
+        shutil.rmtree(out_dirs["merged_dir"], ignore_errors=True)
+        raise InfraError(f"[engine=vanilla] artifact save failed: {e}") from e
 
 
 def _load_unsloth(spec, dtype, device):
@@ -175,15 +195,17 @@ def _wrap_unsloth(model, r):
     return wrap_unsloth_lora(model, r)
 
 
-def _attempt_engine(load_fn, wrap_fn, spec, r, dtype, device, train_rows, eval_rows, on_progress,
-                     engine_name):
-    """Shared load -> encode -> baseline_eval -> wrap sequence, parameterized
-    by engine-specific load/wrap functions. Used for both engines so the
-    baseline honesty guarantee (eval on the UNWRAPPED model, before any LoRA
-    is attached) and the eval math are identical regardless of which engine
-    ran — that's what keeps baseline/final numbers comparable across engines.
+def _load_and_encode(load_fn, spec, r, dtype, device, train_rows, eval_rows, engine_name):
+    """Model/tokenizer bring-up, plus the tokenization baseline eval needs.
+    Kept together (not split further) because encoding depends on the
+    tokenizer load_fn just returned, and both must finish before there is
+    anything to run baseline eval ON. This whole function IS the first
+    fallback-eligible window for the auto engine in run_finetune: an import
+    failure, a load_fn failure, or an empty-dataset RuntimeError here all mean
+    "this engine never got off the ground" and are equally true regardless of
+    which engine was asked for.
 
-    engine_name is used ONLY to label exceptions raised from here (e.g.
+    engine_name is used ONLY to label the empty-dataset exception (e.g.
     "[engine=unsloth] dataset produced no usable sequences...") — a training
     failure's error message should say which engine was actually running,
     since main.py's failed-result payload has no other way to know that if
@@ -196,15 +218,65 @@ def _attempt_engine(load_fn, wrap_fn, spec, r, dtype, device, train_rows, eval_r
     if not train_enc or not eval_enc:
         raise RuntimeError(
             f"[engine={engine_name}] dataset produced no usable sequences after tokenization")
+    return model, tokenizer, train_enc, eval_enc
 
-    # BASELINE FIRST, on the untouched base model. Without this number there is
-    # nothing to compare the final model to, and "it trained" is not a result.
+
+def _baseline_eval(tokenizer, model, eval_enc, r, device, on_progress):
+    """Eval on the untouched, UNWRAPPED base model — see run_finetune's auto
+    branch for why this call is deliberately NOT inside any fallback-eligible
+    try: an exception here (bad chat template, a real OOM on an eval batch,
+    ...) is a fact about the model/data that is exactly as true for vanilla as
+    it is for unsloth, so it must propagate as EXIT_TRAIN rather than
+    triggering a doomed-to-fail-identically vanilla re-run first.
+
+    BASELINE FIRST, on the untouched base model. Without this number there is
+    nothing to compare the final model to, and "it trained" is not a result.
+    """
     on_progress("baseline_eval", 0.10)
     eval_batches = list(_batched(tokenizer, eval_enc, r.batch_size, device))
     baseline = _evaluate(model, eval_batches)
+    return eval_batches, baseline
 
+
+def _attempt_engine(load_fn, wrap_fn, spec, r, dtype, device, train_rows, eval_rows, on_progress,
+                     engine_name):
+    """Shared load -> encode -> baseline_eval -> wrap sequence, parameterized
+    by engine-specific load/wrap functions. Used for both engines (and for the
+    forced SGL_ENGINE=vanilla/unsloth modes, and for the auto engine's full
+    vanilla retry) so the baseline honesty guarantee and the eval math are
+    identical regardless of which engine ran — that's what keeps
+    baseline/final numbers comparable across engines. The auto engine's OWN
+    first attempt does NOT go through this composed function — see
+    run_finetune's auto branch, which calls _load_and_encode and
+    _baseline_eval directly so it can narrow the fallback window to bring-up
+    only.
+    """
+    model, tokenizer, train_enc, eval_enc = _load_and_encode(
+        load_fn, spec, r, dtype, device, train_rows, eval_rows, engine_name)
+    eval_batches, baseline = _baseline_eval(tokenizer, model, eval_enc, r, device, on_progress)
     model = wrap_fn(model, r)
     return model, tokenizer, train_enc, eval_batches, baseline
+
+
+def _fallback_to_vanilla(exc, engine_mode, spec, r, dtype, device, train_rows, eval_rows, on_progress):
+    """Shared discard-and-rerun path for BOTH of the auto engine's
+    fallback-eligible windows (bring-up, and wrap — see run_finetune). Reseeds
+    past whatever RNG the discarded unsloth attempt consumed, then runs a
+    full, fresh vanilla _attempt_engine: vanilla needs its OWN baseline,
+    evaluated on its OWN loaded model, to be comparable to its own final
+    number, so a wrap-time failure means any unsloth baseline already
+    computed is not reusable and must be thrown away along with it.
+    """
+    reason = type(exc).__name__
+    _set_all_seeds(r.seed)
+    engine = resolve_engine(engine_mode, False)
+    require_engine_for_recipe(engine, r.load_in_4bit)
+    print(f"[sgl] [engine=unsloth] unsloth unavailable ({reason}), "
+          f"falling back to vanilla", file=sys.stderr)
+    model, tokenizer, train_enc, eval_batches, baseline = _attempt_engine(
+        _load_vanilla, _wrap_vanilla_lora, spec, r, dtype, device, train_rows, eval_rows, on_progress,
+        engine_name="vanilla")
+    return reason, engine, model, tokenizer, train_enc, eval_batches, baseline
 
 
 def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
@@ -242,30 +314,41 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
             _load_unsloth, _wrap_unsloth, spec, r, dtype, device, train_rows, eval_rows, on_progress,
             engine_name="unsloth")
     else:
-        # auto: try the unsloth load path. ANY exception during import, model
-        # load, or LoRA wrap falls back to the existing vanilla path unchanged.
-        # Once we're past this block the engine is locked in — no switching
-        # once the training loop has started.
+        # auto: the fallback try covers ONLY bring-up (import + load_unsloth +
+        # the tokenization it needs) and, separately, the LoRA wrap — NOT
+        # baseline eval, which sits between the two and propagates raw. Once
+        # we're past this block the engine is locked in — no switching once
+        # the training loop has started.
         try:
-            model, tokenizer, train_enc, eval_batches, baseline = _attempt_engine(
-                _load_unsloth, _wrap_unsloth, spec, r, dtype, device, train_rows, eval_rows, on_progress,
+            model, tokenizer, train_enc, eval_enc = _load_and_encode(
+                _load_unsloth, spec, r, dtype, device, train_rows, eval_rows,
                 engine_name="unsloth")
-            engine = resolve_engine(engine_mode, True)
         except Exception as e:
-            engine_fallback_reason = type(e).__name__
             # The discarded unsloth attempt (model load, RNG-consuming init,
-            # etc.) already advanced/clobbered global RNG state. Reseed before
-            # the retry so the vanilla run is bit-identical to a pure-vanilla
-            # run with the same seed — not "vanilla, but perturbed by however
-            # far the failed unsloth attempt got".
-            _set_all_seeds(r.seed)
-            engine = resolve_engine(engine_mode, False)
-            require_engine_for_recipe(engine, r.load_in_4bit)
-            print(f"[sgl] [engine=unsloth] unsloth unavailable ({engine_fallback_reason}), "
-                  f"falling back to vanilla", file=sys.stderr)
-            model, tokenizer, train_enc, eval_batches, baseline = _attempt_engine(
-                _load_vanilla, _wrap_vanilla_lora, spec, r, dtype, device, train_rows, eval_rows, on_progress,
-                engine_name="vanilla")
+            # etc.) already advanced/clobbered global RNG state; _fallback_to_vanilla
+            # reseeds before the retry so the vanilla run is bit-identical to a
+            # pure-vanilla run with the same seed.
+            (engine_fallback_reason, engine, model, tokenizer, train_enc, eval_batches,
+             baseline) = _fallback_to_vanilla(
+                e, engine_mode, spec, r, dtype, device, train_rows, eval_rows, on_progress)
+        else:
+            eval_batches, baseline = _baseline_eval(tokenizer, model, eval_enc, r, device, on_progress)
+            try:
+                model = _wrap_unsloth(model, r)
+            except Exception as e:
+                # A wrap failure discards this (valid) unsloth baseline too —
+                # see _fallback_to_vanilla's docstring for why that full
+                # discard-and-rerun is correct, not wasteful.
+                (engine_fallback_reason, engine, model, tokenizer, train_enc, eval_batches,
+                 baseline) = _fallback_to_vanilla(
+                    e, engine_mode, spec, r, dtype, device, train_rows, eval_rows, on_progress)
+            else:
+                engine = resolve_engine(engine_mode, True)
+
+    # Report what the model ACTUALLY loaded in (see _model_dtype), not the
+    # heuristic `dtype` computed above — that heuristic is what vanilla was
+    # asked for, but unsloth was handed dtype=None and auto-picked its own.
+    actual_dtype = _model_dtype(model)
 
     optim = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=r.lr)
@@ -302,5 +385,5 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
         _save_vanilla(model, tokenizer, out_dirs)
 
     return {"baseline": baseline, "final": final, "steps": step, "seed": r.seed,
-            "device": device, "dtype": str(dtype),
+            "device": device, "dtype": actual_dtype,
             "engine": engine, "engine_fallback_reason": engine_fallback_reason}

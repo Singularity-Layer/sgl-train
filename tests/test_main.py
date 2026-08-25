@@ -244,7 +244,7 @@ def test_failed_training_error_carries_the_engine_label_when_train_raised_it():
     rep = SpyReporter()
 
     def boom_infra(*a):
-        raise InfraError("[engine=vanilla] artifact save failed (disk?): boom")
+        raise InfraError("[engine=vanilla] artifact save failed: boom")
 
     code = execute(BASE, make_deps(rep, train=boom_infra))
     assert code == EXIT_INFRA
