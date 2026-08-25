@@ -86,7 +86,10 @@ RUN pip install --no-cache-dir --no-deps \
 # GPU-gates at import time, so that would fail in CI regardless of whether the
 # pins above are correct. The real runtime gate for unsloth itself is the
 # forced SGL_ENGINE=unsloth smoke step (GPU hardware, not this build).
-RUN python -c "import unsloth_zoo, xformers, bitsandbytes, cut_cross_entropy, diffusers, tyro"
+RUN python -c "import importlib.util as u; \
+    assert u.find_spec('unsloth'), 'unsloth not installed'; \
+    assert u.find_spec('unsloth_zoo'), 'unsloth_zoo not installed'; \
+    import xformers, bitsandbytes, cut_cross_entropy, diffusers, tyro"
 
 # convert_hf_to_gguf.py is pure Python and lives in the llama.cpp tree; llama-quantize
 # is a compiled binary we take from the prebuilt release rather than compiling here.
