@@ -12,7 +12,7 @@ from __future__ import annotations
 import os
 import shutil
 
-from .errors import InfraError
+from .errors import InfraError, attach_context
 
 
 def load_unsloth(spec, dtype_hint):
@@ -41,19 +41,24 @@ def load_unsloth(spec, dtype_hint):
     """
     from unsloth import FastLanguageModel
 
-    model, tokenizer = FastLanguageModel.from_pretrained(
-        model_name=spec.unsloth_repo,
-        revision=spec.unsloth_revision,
-        max_seq_length=spec.recipe.max_seq_len,
-        load_in_4bit=spec.recipe.load_in_4bit,
-        dtype=None,
-    )
+    try:
+        model, tokenizer = FastLanguageModel.from_pretrained(
+            model_name=spec.unsloth_repo,
+            revision=spec.unsloth_revision,
+            max_seq_length=spec.recipe.max_seq_len,
+            load_in_4bit=spec.recipe.load_in_4bit,
+            dtype=None,
+        )
+    except Exception as e:
+        raise attach_context(
+            e,
+            engine="unsloth", trained_repo=spec.unsloth_repo, trained_revision=spec.unsloth_revision) from e
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
 
 
-def wrap_unsloth_lora(model, recipe):
+def wrap_unsloth_lora(model, recipe, spec):
     """Attach a LoRA adapter via unsloth's own PEFT wrapper.
 
     Kept as a distinct function (not inlined) so a wrap-time failure has a
@@ -62,17 +67,22 @@ def wrap_unsloth_lora(model, recipe):
     """
     from unsloth import FastLanguageModel
 
-    return FastLanguageModel.get_peft_model(
-        model,
-        r=recipe.lora_rank,
-        lora_alpha=recipe.lora_alpha,
-        lora_dropout=0.05,
-        bias="none",
-        random_state=recipe.seed,
-    )
+    try:
+        return FastLanguageModel.get_peft_model(
+            model,
+            r=recipe.lora_rank,
+            lora_alpha=recipe.lora_alpha,
+            lora_dropout=0.05,
+            bias="none",
+            random_state=recipe.seed,
+        )
+    except Exception as e:
+        raise attach_context(
+            e,
+            engine="unsloth", trained_repo=spec.unsloth_repo, trained_revision=spec.unsloth_revision) from e
 
 
-def save_unsloth(model, tokenizer, out_dirs, load_in_4bit) -> None:
+def save_unsloth(model, tokenizer, out_dirs, load_in_4bit, spec) -> None:
     """Write the SAME on-disk layout the vanilla path writes: an adapter_dir
     (the LoRA adapter alone) and a merged_dir (full merged weights). main.py's
     tar/convert stages read both of these by directory name and don't know or
@@ -106,4 +116,6 @@ def save_unsloth(model, tokenizer, out_dirs, load_in_4bit) -> None:
         # recipe. Never leave a half-written merged_dir for a retry to tar up
         # as if it were a complete artifact.
         shutil.rmtree(out_dirs["merged_dir"], ignore_errors=True)
-        raise InfraError(f"[engine=unsloth] artifact save failed: {e}") from e
+        raise attach_context(
+            InfraError(f"[engine=unsloth] artifact save failed: {e}"),
+            engine="unsloth", trained_repo=spec.unsloth_repo, trained_revision=spec.unsloth_revision) from e

@@ -29,6 +29,19 @@ def _out_dirs(tmp_path):
     return {"adapter_dir": str(tmp_path / "adapter"), "merged_dir": str(tmp_path / "merged")}
 
 
+class _FakeSpec:
+    """Minimal spec for test usage."""
+    def __init__(self):
+        self.hf_repo = "Q/M"
+        self.hf_revision = "sha"
+        self.unsloth_repo = "unsloth/M"
+        self.unsloth_revision = "unsloth-sha"
+
+
+def _spec():
+    return _FakeSpec()
+
+
 # --- _save_vanilla -----------------------------------------------------------
 
 class _AdapterSaveRaises:
@@ -68,20 +81,20 @@ class _MergeSucceedsButSaveIsPartial:
 @pytest.mark.parametrize("exc", [OSError("disk full"), RuntimeError("cuda oom during merge")])
 def test_save_vanilla_adapter_save_failure_is_infra_error_any_exception_type(tmp_path, exc):
     with pytest.raises(InfraError, match=r"\[engine=vanilla\] artifact save failed"):
-        trainer._save_vanilla(_AdapterSaveRaises(exc), _FakeTokenizer(), _out_dirs(tmp_path))
+        trainer._save_vanilla(_AdapterSaveRaises(exc), _FakeTokenizer(), _out_dirs(tmp_path), _spec())
 
 
 @pytest.mark.parametrize("exc", [OSError("disk full"), RuntimeError("cuda oom during merge")])
 def test_save_vanilla_merge_failure_is_infra_error_any_exception_type(tmp_path, exc):
     with pytest.raises(InfraError, match=r"\[engine=vanilla\] artifact save failed"):
-        trainer._save_vanilla(_MergeRaises(exc), _FakeTokenizer(), _out_dirs(tmp_path))
+        trainer._save_vanilla(_MergeRaises(exc), _FakeTokenizer(), _out_dirs(tmp_path), _spec())
 
 
 def test_save_vanilla_cleans_partial_merged_dir_on_failure(tmp_path):
     out_dirs = _out_dirs(tmp_path)
 
     with pytest.raises(InfraError):
-        trainer._save_vanilla(_MergeSucceedsButSaveIsPartial(), _FakeTokenizer(), out_dirs)
+        trainer._save_vanilla(_MergeSucceedsButSaveIsPartial(), _FakeTokenizer(), out_dirs, _spec())
 
     assert not os.path.exists(out_dirs["merged_dir"])
 
@@ -92,7 +105,7 @@ def test_save_vanilla_infra_error_is_not_double_wrapped(tmp_path):
             raise InfraError("[engine=vanilla] some inner infra failure")
 
     with pytest.raises(InfraError, match="some inner infra failure"):
-        trainer._save_vanilla(_RaisesInfraDirectly(), _FakeTokenizer(), _out_dirs(tmp_path))
+        trainer._save_vanilla(_RaisesInfraDirectly(), _FakeTokenizer(), _out_dirs(tmp_path), _spec())
 
 
 def test_save_vanilla_success_leaves_both_dirs_populated(tmp_path):
@@ -111,7 +124,7 @@ def test_save_vanilla_success_leaves_both_dirs_populated(tmp_path):
             return _Merged()
 
     out_dirs = _out_dirs(tmp_path)
-    trainer._save_vanilla(_Model(), _FakeTokenizer(), out_dirs)
+    trainer._save_vanilla(_Model(), _FakeTokenizer(), out_dirs, _spec())
 
     assert os.path.exists(os.path.join(out_dirs["adapter_dir"], "adapter.bin"))
     assert os.path.exists(os.path.join(out_dirs["merged_dir"], "model.safetensors"))
@@ -145,14 +158,14 @@ class _Unsloth4bitMergeRaises:
 def test_save_unsloth_16bit_merge_failure_is_infra_error_any_exception_type(tmp_path, exc):
     with pytest.raises(InfraError, match=r"\[engine=unsloth\] artifact save failed"):
         trainer_unsloth.save_unsloth(
-            _UnslothMergeRaises(exc), _FakeTokenizer(), _out_dirs(tmp_path), load_in_4bit=False)
+            _UnslothMergeRaises(exc), _FakeTokenizer(), _out_dirs(tmp_path), load_in_4bit=False, spec=_spec())
 
 
 @pytest.mark.parametrize("exc", [OSError("disk full"), RuntimeError("dequant failed")])
 def test_save_unsloth_4bit_merge_failure_is_infra_error_any_exception_type(tmp_path, exc):
     with pytest.raises(InfraError, match=r"\[engine=unsloth\] artifact save failed"):
         trainer_unsloth.save_unsloth(
-            _Unsloth4bitMergeRaises(exc), _FakeTokenizer(), _out_dirs(tmp_path), load_in_4bit=True)
+            _Unsloth4bitMergeRaises(exc), _FakeTokenizer(), _out_dirs(tmp_path), load_in_4bit=True, spec=_spec())
 
 
 def test_save_unsloth_cleans_partial_merged_dir_on_failure(tmp_path):
@@ -172,7 +185,7 @@ def test_save_unsloth_cleans_partial_merged_dir_on_failure(tmp_path):
             return _PartialMerged()
 
     with pytest.raises(InfraError):
-        trainer_unsloth.save_unsloth(_Model(), _FakeTokenizer(), out_dirs, load_in_4bit=False)
+        trainer_unsloth.save_unsloth(_Model(), _FakeTokenizer(), out_dirs, load_in_4bit=False, spec=_spec())
 
     assert not os.path.exists(out_dirs["merged_dir"])
 
@@ -184,4 +197,4 @@ def test_save_unsloth_infra_error_is_not_double_wrapped(tmp_path):
 
     with pytest.raises(InfraError, match="some inner infra failure"):
         trainer_unsloth.save_unsloth(
-            _RaisesInfraDirectly(), _FakeTokenizer(), _out_dirs(tmp_path), load_in_4bit=False)
+            _RaisesInfraDirectly(), _FakeTokenizer(), _out_dirs(tmp_path), load_in_4bit=False, spec=_spec())

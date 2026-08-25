@@ -98,10 +98,18 @@ def execute(raw_spec: dict, deps: Deps) -> int:
     try:
         outcome = deps.train(spec, train_rows, eval_rows, dirs, rep.progress)
     except InfraError as e:
-        rep.result("failed", {"error": str(e)})
+        payload = {"error": str(e)}
+        # Merge any attached context (engine, trained_repo, trained_revision).
+        ctx = getattr(e, 'sgl_context', {})
+        payload.update(ctx)
+        rep.result("failed", payload)
         return EXIT_INFRA
     except Exception as e:
-        rep.result("failed", {"error": f"training failed: {e}"})
+        payload = {"error": f"training failed: {e}"}
+        # Merge any attached context (engine, trained_repo, trained_revision).
+        ctx = getattr(e, 'sgl_context', {})
+        payload.update(ctx)
+        rep.result("failed", payload)
         return EXIT_TRAIN
 
     # GGUF is a nice-to-have. Losing it costs deploy-to-grid, not the run.

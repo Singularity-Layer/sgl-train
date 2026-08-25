@@ -291,3 +291,52 @@ def test_failed_training_error_carries_the_engine_label_when_train_raised_it():
     code2 = execute(BASE, make_deps(rep2, train=boom_generic))
     assert code2 == EXIT_TRAIN
     assert "[engine=unsloth]" in rep2.results[-1][1]["error"]
+
+
+def test_infra_error_with_attached_context_includes_engine_and_weights_in_payload():
+    from runner.errors import attach_context
+    rep = SpyReporter()
+
+    def boom(*a):
+        exc = InfraError("something failed")
+        attach_context(exc, engine="vanilla", trained_repo="Q/M", trained_revision="sha")
+        raise exc
+
+    code = execute(BASE, make_deps(rep, train=boom))
+    assert code == EXIT_INFRA
+    payload = rep.results[-1][1]
+    assert payload["error"] == "something failed"
+    assert payload["engine"] == "vanilla"
+    assert payload["trained_repo"] == "Q/M"
+    assert payload["trained_revision"] == "sha"
+
+
+def test_generic_exception_with_attached_context_includes_context_in_payload():
+    from runner.errors import attach_context
+    rep = SpyReporter()
+
+    def boom(*a):
+        exc = RuntimeError("unsloth load failed")
+        attach_context(exc, engine="unsloth", trained_repo="unsloth/M", trained_revision="unsloth-sha")
+        raise exc
+
+    code = execute(BASE, make_deps(rep, train=boom))
+    assert code == EXIT_TRAIN
+    payload = rep.results[-1][1]
+    assert payload["error"] == "training failed: unsloth load failed"
+    assert payload["engine"] == "unsloth"
+    assert payload["trained_repo"] == "unsloth/M"
+    assert payload["trained_revision"] == "unsloth-sha"
+
+
+def test_exception_without_attached_context_does_not_crash():
+    rep = SpyReporter()
+
+    def boom(*a):
+        raise RuntimeError("bare exception")
+
+    code = execute(BASE, make_deps(rep, train=boom))
+    assert code == EXIT_TRAIN
+    payload = rep.results[-1][1]
+    assert payload["error"] == "training failed: bare exception"
+    assert "engine" not in payload or payload.get("engine") is None

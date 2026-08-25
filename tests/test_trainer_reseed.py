@@ -146,7 +146,7 @@ def test_bringup_failure_falls_back_to_vanilla_and_reseeds(monkeypatch, fake_tor
     monkeypatch.setattr(trainer, "_set_all_seeds", lambda seed: seed_calls.append(seed))
     monkeypatch.setattr(trainer, "_evaluate", lambda model, batches: {
         "eval_loss": 1.0, "perplexity": 2.7, "eval_tokens": 10})
-    monkeypatch.setattr(trainer, "_save_vanilla", lambda model, tokenizer, out_dirs: None)
+    monkeypatch.setattr(trainer, "_save_vanilla", lambda model, tokenizer, out_dirs, spec: None)
 
     def fake_load_and_encode(load_fn, spec_, r, dtype, device, train_rows, eval_rows, engine_name):
         assert engine_name == "unsloth"
@@ -159,7 +159,7 @@ def test_bringup_failure_falls_back_to_vanilla_and_reseeds(monkeypatch, fake_tor
 
     wrap_calls = []
     monkeypatch.setattr(trainer, "_wrap_unsloth",
-                         lambda model, r: wrap_calls.append(1) or model)
+                         lambda model, r, spec: wrap_calls.append(1) or model)
 
     attempt_calls = []
 
@@ -195,7 +195,7 @@ def test_wrap_failure_falls_back_to_vanilla_and_reseeds(monkeypatch, fake_torch)
     monkeypatch.setattr(trainer, "_set_all_seeds", lambda seed: seed_calls.append(seed))
     monkeypatch.setattr(trainer, "_evaluate", lambda model, batches: {
         "eval_loss": 1.0, "perplexity": 2.7, "eval_tokens": 10})
-    monkeypatch.setattr(trainer, "_save_vanilla", lambda model, tokenizer, out_dirs: None)
+    monkeypatch.setattr(trainer, "_save_vanilla", lambda model, tokenizer, out_dirs, spec: None)
 
     monkeypatch.setattr(trainer, "_load_and_encode", _fake_load_and_encode())
 
@@ -206,7 +206,7 @@ def test_wrap_failure_falls_back_to_vanilla_and_reseeds(monkeypatch, fake_torch)
         return [], {"eval_loss": 9.0, "perplexity": 99.0, "eval_tokens": 10}
     monkeypatch.setattr(trainer, "_baseline_eval", fake_baseline_eval)
 
-    def fake_wrap_unsloth(model, r):
+    def fake_wrap_unsloth(model, r, spec):
         raise RuntimeError("simulated wrap failure")
     monkeypatch.setattr(trainer, "_wrap_unsloth", fake_wrap_unsloth)
 
@@ -248,7 +248,7 @@ def test_baseline_eval_failure_does_not_fall_back(monkeypatch, fake_torch):
 
     wrap_calls = []
     monkeypatch.setattr(trainer, "_wrap_unsloth",
-                         lambda model, r: wrap_calls.append(1) or model)
+                         lambda model, r, spec: wrap_calls.append(1) or model)
 
     def fake_attempt(*a, **k):
         raise AssertionError("must not fall back to vanilla on a baseline-eval failure")
@@ -277,7 +277,7 @@ def test_success_path_seeds_exactly_once(monkeypatch, fake_torch):
     monkeypatch.setattr(trainer, "_baseline_eval",
                          lambda tokenizer, model, eval_enc, r, device, on_progress:
                          ([], {"eval_loss": 2.0, "perplexity": 7.4, "eval_tokens": 10}))
-    monkeypatch.setattr(trainer, "_wrap_unsloth", lambda model, r: model)
+    monkeypatch.setattr(trainer, "_wrap_unsloth", lambda model, r, spec: model)
 
     result = trainer.run_finetune(
         spec, [], [], {"adapter_dir": "/x", "merged_dir": "/y"}, lambda *a, **k: None)
@@ -303,7 +303,7 @@ def test_auto_with_no_unsloth_pin_never_attempts_unsloth_and_goes_straight_to_va
     monkeypatch.setattr(trainer, "_set_all_seeds", lambda seed: seed_calls.append(seed))
     monkeypatch.setattr(trainer, "_evaluate", lambda model, batches: {
         "eval_loss": 1.0, "perplexity": 2.7, "eval_tokens": 10})
-    monkeypatch.setattr(trainer, "_save_vanilla", lambda model, tokenizer, out_dirs: None)
+    monkeypatch.setattr(trainer, "_save_vanilla", lambda model, tokenizer, out_dirs, spec: None)
 
     # _load_and_encode is the unsloth bring-up seam (import + load_unsloth) —
     # if the no-pin gate is doing its job this must never be called at all.

@@ -73,18 +73,30 @@ def _req(d: dict, key: str, where: str) -> object:
 def _optional_pair(d: dict, key_a: str, key_b: str, where: str) -> tuple[str | None, str | None]:
     """Both-or-neither optional string pair, e.g. unsloth_repo/unsloth_revision.
 
-    Presence uses the same emptiness rule as _req (missing key or "" counts as
-    absent). If exactly one of the pair is present the spec is unusable — a
-    repo with no pinned revision (or vice versa) is not reproducible — so that
-    raises SpecError rather than silently picking a default.
+    Presence requires each field, when present, to be an actual str whose
+    .strip() is non-empty. Missing key, None, empty/whitespace string, or
+    non-str type all count as absent. If exactly one of the pair is present
+    the spec is unusable — a repo with no pinned revision (or vice versa)
+    is not reproducible — so that raises SpecError rather than silently
+    picking a default.
+
+    Stored values are stripped of leading/trailing whitespace.
     """
-    a_present = d.get(key_a) not in (None, "")
-    b_present = d.get(key_b) not in (None, "")
+    def is_valid_string(v: object) -> bool:
+        return isinstance(v, str) and v.strip() != ""
+
+    a_present = is_valid_string(d.get(key_a))
+    b_present = is_valid_string(d.get(key_b))
     if a_present != b_present:
         raise SpecError(f"{where}: '{key_a}' and '{key_b}' must both be present or both be absent")
     if not a_present:
         return None, None
-    return str(d[key_a]), str(d[key_b])
+    # Both are present and valid strings; strip and return.
+    a_val = d[key_a]  # type: ignore  # guarded by is_valid_string above
+    b_val = d[key_b]  # type: ignore
+    if not isinstance(a_val, str) or not isinstance(b_val, str):
+        raise SpecError(f"{where}: '{key_a}' and '{key_b}' must be strings")
+    return a_val.strip(), b_val.strip()
 
 
 def _check_url(name: str, value: str) -> None:

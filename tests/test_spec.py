@@ -179,3 +179,63 @@ def test_unsloth_mirror_pin_treats_empty_string_as_absent(empty):
     s = parse_spec(raw)
     assert s.unsloth_repo is None
     assert s.unsloth_revision is None
+
+
+# --- Strict pin validation: both fields must be non-empty strings -----
+
+def test_unsloth_repo_with_whitespace_only_raises():
+    """Whitespace-only strings must raise SpecError."""
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_repo": "   ",
+        "unsloth_revision": "ae616882a38b36759fc46ac3fd6769498833b913",
+    }}
+    with pytest.raises(SpecError, match="unsloth_repo.*unsloth_revision"):
+        parse_spec(raw)
+
+
+def test_unsloth_revision_with_whitespace_only_raises():
+    """Whitespace-only revision must raise SpecError."""
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_repo": "unsloth/Qwen2.5-0.5B-Instruct",
+        "unsloth_revision": "  \t  ",
+    }}
+    with pytest.raises(SpecError, match="unsloth_repo.*unsloth_revision"):
+        parse_spec(raw)
+
+
+@pytest.mark.parametrize("non_string", [0, 1, 0.0, [], {}, True, False])
+def test_unsloth_repo_non_string_raises(non_string):
+    """Non-string types must raise SpecError."""
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_repo": non_string,
+        "unsloth_revision": "ae616882a38b36759fc46ac3fd6769498833b913",
+    }}
+    with pytest.raises(SpecError, match="unsloth_repo.*unsloth_revision"):
+        parse_spec(raw)
+
+
+@pytest.mark.parametrize("non_string", [0, 1, 0.0, [], {}, True, False])
+def test_unsloth_revision_non_string_raises(non_string):
+    """Non-string revision must raise SpecError."""
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_repo": "unsloth/Qwen2.5-0.5B-Instruct",
+        "unsloth_revision": non_string,
+    }}
+    with pytest.raises(SpecError, match="unsloth_repo.*unsloth_revision"):
+        parse_spec(raw)
+
+
+def test_unsloth_mirror_pin_strips_whitespace():
+    """Valid strings with surrounding whitespace are stripped and stored."""
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_repo": "  unsloth/Qwen2.5-0.5B-Instruct  ",
+        "unsloth_revision": "\n ae616882a38b36759fc46ac3fd6769498833b913 \t",
+    }}
+    s = parse_spec(raw)
+    assert s.unsloth_repo == "unsloth/Qwen2.5-0.5B-Instruct"
+    assert s.unsloth_revision == "ae616882a38b36759fc46ac3fd6769498833b913"

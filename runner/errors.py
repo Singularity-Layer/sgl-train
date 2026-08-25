@@ -6,3 +6,13 @@ from __future__ import annotations
 
 class InfraError(RuntimeError):
     """Our-side infrastructure failure — refundable; never the customer's fault."""
+
+
+def attach_context(exc: Exception, **ctx: object) -> Exception:
+    """Attach execution context (engine, trained_repo, etc.) to an exception.
+
+    Context is stored in exc.sgl_context as a dict, additive to any message.
+    Returns the exception to allow one-liner raises: raise attach_context(...).
+    """
+    exc.sgl_context = dict(ctx)  # type: ignore
+    return exc

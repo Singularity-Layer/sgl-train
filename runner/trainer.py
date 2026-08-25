@@ -13,7 +13,7 @@ import os
 import shutil
 import sys
 
-from .errors import InfraError
+from .errors import InfraError, attach_context
 from .evalmath import aggregate
 
 
@@ -165,14 +165,16 @@ def _load_vanilla(spec, dtype, device):
             spec.hf_repo, revision=spec.hf_revision,
             torch_dtype=dtype, device_map=None)
     except Exception as e:
-        raise InfraError(
-            f"[engine=vanilla] model download failed for {spec.hf_repo}@{spec.hf_revision}: {e}") from e
+        raise attach_context(
+            InfraError(
+                f"[engine=vanilla] model download failed for {spec.hf_repo}@{spec.hf_revision}: {e}"),
+            engine="vanilla", trained_repo=spec.hf_repo, trained_revision=spec.hf_revision) from e
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model.to(device), tokenizer
 
 
-def _wrap_vanilla_lora(model, r):
+def _wrap_vanilla_lora(model, r, spec):
     from peft import LoraConfig, get_peft_model
 
     model = get_peft_model(model, LoraConfig(
@@ -182,7 +184,7 @@ def _wrap_vanilla_lora(model, r):
     return model
 
 
-def _save_vanilla(model, tokenizer, out_dirs) -> None:
+def _save_vanilla(model, tokenizer, out_dirs, spec) -> None:
     # Training-loop failures above stay EXIT_TRAIN — they're a fact about the run.
     # By the time we get here, training already succeeded and the compute was
     # delivered; ANY exception in this stage (disk full, a merge OOM, a
@@ -204,7 +206,9 @@ def _save_vanilla(model, tokenizer, out_dirs) -> None:
         # Best-effort: never leave a half-written merged_dir for a retry to
         # tar up as if it were a complete artifact.
         shutil.rmtree(out_dirs["merged_dir"], ignore_errors=True)
-        raise InfraError(f"[engine=vanilla] artifact save failed: {e}") from e
+        raise attach_context(
+            InfraError(f"[engine=vanilla] artifact save failed: {e}"),
+            engine="vanilla", trained_repo=spec.hf_repo, trained_revision=spec.hf_revision) from e
 
 
 def _load_unsloth(spec, dtype, device):
@@ -212,9 +216,9 @@ def _load_unsloth(spec, dtype, device):
     return load_unsloth(spec, dtype)
 
 
-def _wrap_unsloth(model, r):
+def _wrap_unsloth(model, r, spec):
     from .trainer_unsloth import wrap_unsloth_lora
-    return wrap_unsloth_lora(model, r)
+    return wrap_unsloth_lora(model, r, spec)
 
 
 def _load_and_encode(load_fn, spec, r, dtype, device, train_rows, eval_rows, engine_name):
@@ -276,7 +280,7 @@ def _attempt_engine(load_fn, wrap_fn, spec, r, dtype, device, train_rows, eval_r
     model, tokenizer, train_enc, eval_enc = _load_and_encode(
         load_fn, spec, r, dtype, device, train_rows, eval_rows, engine_name)
     eval_batches, baseline = _baseline_eval(tokenizer, model, eval_enc, r, device, on_progress)
-    model = wrap_fn(model, r)
+    model = wrap_fn(model, r, spec)
     return model, tokenizer, train_enc, eval_batches, baseline
 
 
@@ -379,7 +383,7 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
         else:
             eval_batches, baseline = _baseline_eval(tokenizer, model, eval_enc, r, device, on_progress)
             try:
-                model = _wrap_unsloth(model, r)
+                model = _wrap_unsloth(model, r, spec)
             except Exception as e:
                 # A wrap failure discards this (valid) unsloth baseline too —
                 # see _fallback_to_vanilla's docstring for why that full
@@ -425,9 +429,9 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
     on_progress("saving", 0.92)
     if engine == "unsloth":
         from .trainer_unsloth import save_unsloth
-        save_unsloth(model, tokenizer, out_dirs, r.load_in_4bit)
+        save_unsloth(model, tokenizer, out_dirs, r.load_in_4bit, spec)
     else:
-        _save_vanilla(model, tokenizer, out_dirs)
+        _save_vanilla(model, tokenizer, out_dirs, spec)
 
     # Honesty: which repo+revision ACTUALLY trained. vanilla trains spec.hf_repo
     # @ spec.hf_revision directly; unsloth trains the pinned MIRROR instead (see
