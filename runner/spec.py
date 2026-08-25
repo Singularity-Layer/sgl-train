@@ -55,6 +55,8 @@ class JobSpec:
     hf_revision: str
     unsloth_repo: str | None
     unsloth_revision: str | None
+    unsloth_4bit_repo: str | None
+    unsloth_4bit_revision: str | None
     dataset_url: str
     quantize: str
     progress_url: str
@@ -197,6 +199,19 @@ def parse_spec(raw: dict) -> JobSpec:
     # runner/trainer.py: unsloth_pin_ok).
     unsloth_repo, unsloth_revision = _optional_pair(
         base, "unsloth_repo", "unsloth_revision", "base_model")
+    # OPTIONAL: a SECOND, independent mirror pin for the 4-bit (QLoRA) path.
+    # Live GPU smoke (2026-08-25) proved unsloth's remap goes one level
+    # deeper when load_in_4bit=True: FastLanguageModel.from_pretrained
+    # resolves to a THIRD repo — a dedicated pre-quantized "-unsloth-bnb-4bit"
+    # mirror, distinct from both the canonical repo and the 16-bit unsloth
+    # mirror — and again applies whatever revision it was handed, which
+    # belongs to neither of those. unsloth_repo/unsloth_revision above pin the
+    # 16-bit mirror; these two pin the 4-bit mirror. Same strict
+    # both-or-neither validation, same "absent" semantics (missing key or
+    # explicit null only). See runner/trainer_unsloth.py's load_unsloth and
+    # runner/trainer.py's unsloth_pin_for.
+    unsloth_4bit_repo, unsloth_4bit_revision = _optional_pair(
+        base, "unsloth_4bit_repo", "unsloth_4bit_revision", "base_model")
 
     raw_recipe = raw.get("recipe") or {}
     if not isinstance(raw_recipe, dict):
@@ -250,6 +265,8 @@ def parse_spec(raw: dict) -> JobSpec:
         hf_revision=hf_revision,
         unsloth_repo=unsloth_repo,
         unsloth_revision=unsloth_revision,
+        unsloth_4bit_repo=unsloth_4bit_repo,
+        unsloth_4bit_revision=unsloth_4bit_revision,
         dataset_url=dataset_url,
         quantize=quantize,
         progress_url=progress_url,

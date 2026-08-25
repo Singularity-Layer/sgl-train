@@ -50,26 +50,49 @@ def resolve_engine(env_value: str, unsloth_probe_result: bool) -> str:
     return "unsloth" if unsloth_probe_result else "vanilla"
 
 
+def unsloth_pin_for(spec, load_in_4bit: bool) -> tuple[str, str] | None:
+    """The unsloth mirror pin that MUST be used for this load_in_4bit shape,
+    or None if it isn't pinned. Pure, no imports (same rule as resolve_engine/
+    require_engine_for_recipe) — used by both the decision layer here AND the
+    loader (runner/trainer_unsloth.py's load_unsloth), so the "is unsloth
+    usable" check and the actual load can never disagree about which pin pair
+    applies.
+
+    Why two separate pins exist at all: unsloth's FastLanguageModel.from_pretrained
+    silently remaps a canonical repo name (e.g. "Qwen/Qwen2.5-0.5B-Instruct")
+    to a mirror namespace but still applies whatever revision it was given — a
+    revision that belongs to the canonical repo, not the mirror. Live GPU
+    smoke (2026-08-25) proved this remap goes one level deeper under QLoRA:
+    with load_in_4bit=True, unsloth resolves to a THIRD repo — a dedicated
+    pre-quantized "-unsloth-bnb-4bit" mirror, distinct from the 16-bit mirror
+    — and again applies whatever revision it was handed. So the 16-bit pin
+    (unsloth_repo/unsloth_revision) and the 4-bit pin (unsloth_4bit_repo/
+    unsloth_4bit_revision) are independent and NEITHER one substitutes for the
+    other (see runner/trainer_unsloth.py's load_unsloth docstring).
+    """
+    repo, revision = ((spec.unsloth_4bit_repo, spec.unsloth_4bit_revision) if load_in_4bit
+                      else (spec.unsloth_repo, spec.unsloth_revision))
+    if repo is None or revision is None:
+        return None
+    return repo, revision
+
+
 def unsloth_pin_ok(spec) -> bool:
-    """True iff this spec carries a pinned unsloth mirror repo+revision.
+    """True iff this spec carries a pinned 16-bit unsloth mirror repo+revision.
 
     Pure, no imports (same rule as resolve_engine/require_engine_for_recipe).
     spec.py enforces unsloth_repo/unsloth_revision as both-or-neither, so
     checking one here would be enough, but checking both documents the
     invariant this function actually depends on rather than spec.py's.
 
-    Why this gate exists at all: unsloth's FastLanguageModel.from_pretrained
-    silently remaps a canonical repo name (e.g. "Qwen/Qwen2.5-0.5B-Instruct")
-    to its own mirror namespace but still applies whatever revision it was
-    given — a revision that belongs to the canonical repo, not the mirror
-    (see runner/trainer_unsloth.py's load_unsloth docstring; this is exactly
-    how the live GPU smoke run failed). Without a mirror-specific pin there is
-    no revision we can hand unsloth that is guaranteed to exist in the mirror,
-    so the unsloth engine must never be attempted at all — see run_finetune's
-    'auto' and forced-'unsloth' branches, both of which check this before
-    doing anything else (before even importing unsloth).
+    This checks the 16-bit pin specifically (see unsloth_pin_for for why there
+    are two independent pins). Callers that need to gate on the pin matching
+    the recipe's actual load_in_4bit should use unsloth_pin_for(spec,
+    load_in_4bit) instead — this function is kept for the non-4bit call sites
+    and for backward compatibility with existing callers/tests that only ever
+    dealt with the 16-bit case.
     """
-    return spec.unsloth_repo is not None and spec.unsloth_revision is not None
+    return unsloth_pin_for(spec, False) is not None
 
 
 def require_engine_for_recipe(engine: str, load_in_4bit: bool) -> None:
@@ -335,25 +358,39 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
     elif v == "unsloth":
         # Forced: no fallback (testing mode). Any exception — import, load, an
         # empty-dataset RuntimeError, a wrap failure — propagates as-is. But a
-        # missing mirror pin is checked BEFORE any of that: attempting the
-        # load anyway risks the silent remap-but-not-revision bug (see
-        # unsloth_pin_ok), and forcing the engine does not mean forcing that
-        # bug too — this is our capability gap, refundable, never the buyer's.
-        if not unsloth_pin_ok(spec):
+        # missing mirror pin FOR THE REQUESTED load_in_4bit SHAPE is checked
+        # BEFORE any of that: attempting the load anyway risks the silent
+        # remap-but-not-revision bug (see unsloth_pin_for), and forcing the
+        # engine does not mean forcing that bug too — this is our capability
+        # gap, refundable, never the buyer's.
+        if unsloth_pin_for(spec, r.load_in_4bit) is None:
+            if r.load_in_4bit:
+                raise InfraError(
+                    "[engine=unsloth] no 4-bit unsloth mirror pinned for this base model")
             raise InfraError(
                 "[engine=unsloth] no unsloth mirror pinned for this base model")
         engine = resolve_engine(engine_mode, True)
         model, tokenizer, train_enc, eval_batches, baseline = _attempt_engine(
             _load_unsloth, _wrap_unsloth, spec, r, dtype, device, train_rows, eval_rows, on_progress,
             engine_name="unsloth")
-    elif not unsloth_pin_ok(spec):
-        # auto, but no unsloth mirror is pinned for this base model: never
-        # attempt unsloth at all — no import, no probe, no wasted load. This
-        # is cheaper than the bring-up fallback below AND avoids the silent
-        # remap-but-not-revision bug entirely rather than triggering and then
-        # recovering from it (see unsloth_pin_ok). Nothing here touches RNG
-        # state, so — unlike _fallback_to_vanilla — there is nothing to
-        # reseed past.
+    elif unsloth_pin_for(spec, r.load_in_4bit) is None:
+        if r.load_in_4bit:
+            # 4-bit was requested but no 4-bit mirror is pinned: unsloth
+            # cannot serve this recipe (see unsloth_pin_for), and vanilla has
+            # NO 4-bit path at all (require_engine_for_recipe). There is
+            # nothing to silently fall back TO — falling back to vanilla
+            # would just trade this loud, refundable failure for a doomed
+            # attempt that fails the same way one call later. Raise
+            # immediately rather than burning that attempt first.
+            raise InfraError(
+                "[engine=unsloth] no 4-bit unsloth mirror pinned for this base model")
+        # auto, non-4bit, but no 16-bit unsloth mirror is pinned for this base
+        # model: never attempt unsloth at all — no import, no probe, no
+        # wasted load. This is cheaper than the bring-up fallback below AND
+        # avoids the silent remap-but-not-revision bug entirely rather than
+        # triggering and then recovering from it (see unsloth_pin_for).
+        # Nothing here touches RNG state, so — unlike _fallback_to_vanilla —
+        # there is nothing to reseed past.
         engine_fallback_reason = "NoUnslothPin"
         engine = resolve_engine(engine_mode, False)
         require_engine_for_recipe(engine, r.load_in_4bit)
@@ -435,10 +472,15 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
 
     # Honesty: which repo+revision ACTUALLY trained. vanilla trains spec.hf_repo
     # @ spec.hf_revision directly; unsloth trains the pinned MIRROR instead (see
-    # unsloth_pin_ok / trainer_unsloth.load_unsloth) — the report must say so
+    # unsloth_pin_for / trainer_unsloth.load_unsloth) — the report must say so
     # rather than implying the canonical repo was what produced these weights.
+    # unsloth_pin_for(spec, r.load_in_4bit) is the SAME call the engine
+    # decision above used to confirm unsloth was even attemptable, so this can
+    # never disagree with what was actually loaded: it reports the 4-BIT
+    # mirror when load_in_4bit ran, since those are the weights that actually
+    # trained, not the 16-bit pair.
     if engine == "unsloth":
-        trained_repo, trained_revision = spec.unsloth_repo, spec.unsloth_revision
+        trained_repo, trained_revision = unsloth_pin_for(spec, r.load_in_4bit)
     else:
         trained_repo, trained_revision = spec.hf_repo, spec.hf_revision
 

@@ -64,6 +64,27 @@ RAW_SPEC_NO_UNSLOTH_PIN = {
     "base_model": {"hf_repo": "Q/M", "revision": "sha"},
 }
 
+# load_in_4bit=True with a 4-bit mirror pin ALSO present — the pair the live
+# GPU smoke run proved is a THIRD, independent repo from the 16-bit mirror
+# above (see runner/trainer_unsloth.py's load_unsloth docstring).
+RAW_SPEC_4BIT_PIN = {
+    **RAW_SPEC,
+    "base_model": {
+        **RAW_SPEC["base_model"],
+        "unsloth_4bit_repo": "unsloth/M-unsloth-bnb-4bit",
+        "unsloth_4bit_revision": "4bit-sha",
+    },
+    "recipe": {**RAW_SPEC["recipe"], "load_in_4bit": True},
+}
+
+# load_in_4bit=True, 16-bit mirror pin present, but NO 4-bit pin — this is
+# exactly the shape that failed live: the 16-bit pin does not help, unsloth
+# still remaps to the (unpinned) 4-bit mirror and 404s.
+RAW_SPEC_4BIT_NO_PIN = {
+    **RAW_SPEC,
+    "recipe": {**RAW_SPEC["recipe"], "load_in_4bit": True},
+}
+
 
 def _spec():
     return parse_spec(RAW_SPEC)
@@ -71,6 +92,14 @@ def _spec():
 
 def _spec_no_pin():
     return parse_spec(RAW_SPEC_NO_UNSLOTH_PIN)
+
+
+def _spec_4bit_pin():
+    return parse_spec(RAW_SPEC_4BIT_PIN)
+
+
+def _spec_4bit_no_pin():
+    return parse_spec(RAW_SPEC_4BIT_NO_PIN)
 
 
 class _FakeCuda:
@@ -352,3 +381,150 @@ def test_forced_unsloth_with_no_pin_raises_infra_error_before_any_attempt(
     with pytest.raises(InfraError, match=r"\[engine=unsloth\] no unsloth mirror pinned"):
         trainer.run_finetune(
             spec, [], [], {"adapter_dir": "/x", "merged_dir": "/y"}, lambda *a, **k: None)
+
+
+# --- QLoRA (load_in_4bit): the 4-bit mirror pin is independent -------------
+# Live GPU smoke (2026-08-25): SGL_ENGINE=unsloth + load_in_4bit=true + the
+# (non-4bit) mirror pin failed — unsloth remaps to a THIRD, dedicated
+# "-unsloth-bnb-4bit" repo and applies the 16-bit mirror's revision, which
+# doesn't exist there. The 16-bit pin being present must NOT be read as
+# "unsloth is usable" once load_in_4bit is true.
+
+def test_auto_4bit_with_no_4bit_pin_raises_infra_error_without_attempting_unsloth(
+        monkeypatch, fake_torch):
+    spec = _spec_4bit_no_pin()
+    assert spec.recipe.load_in_4bit is True
+    assert spec.unsloth_repo is not None  # the 16-bit pin IS present...
+    assert spec.unsloth_4bit_repo is None  # ...but the 4-bit pin is not
+
+    monkeypatch.setattr(trainer, "_set_all_seeds", lambda seed: None)
+
+    def fake_load_and_encode(*a, **k):
+        raise AssertionError("must not attempt an unsloth load without a 4-bit mirror pin")
+    monkeypatch.setattr(trainer, "_load_and_encode", fake_load_and_encode)
+
+    def fake_attempt(*a, **k):
+        raise AssertionError(
+            "must not silently fall back to vanilla for a 4-bit request — "
+            "vanilla has no 4-bit path at all")
+    monkeypatch.setattr(trainer, "_attempt_engine", fake_attempt)
+
+    with pytest.raises(InfraError, match=r"\[engine=unsloth\] no 4-bit unsloth mirror pinned"):
+        trainer.run_finetune(
+            spec, [], [], {"adapter_dir": "/x", "merged_dir": "/y"}, lambda *a, **k: None)
+
+
+def test_forced_unsloth_4bit_with_no_4bit_pin_raises_infra_error(monkeypatch, fake_torch):
+    monkeypatch.setenv("SGL_ENGINE", "unsloth")
+    spec = _spec_4bit_no_pin()
+
+    monkeypatch.setattr(trainer, "_set_all_seeds", lambda seed: None)
+
+    def fake_attempt(*a, **k):
+        raise AssertionError("must not attempt an unsloth load without a 4-bit mirror pin")
+    monkeypatch.setattr(trainer, "_attempt_engine", fake_attempt)
+
+    with pytest.raises(InfraError, match=r"\[engine=unsloth\] no 4-bit unsloth mirror pinned"):
+        trainer.run_finetune(
+            spec, [], [], {"adapter_dir": "/x", "merged_dir": "/y"}, lambda *a, **k: None)
+
+
+def test_success_path_4bit_reports_4bit_trained_repo(monkeypatch, fake_torch):
+    spec = _spec_4bit_pin()
+
+    monkeypatch.setattr(trainer, "_set_all_seeds", lambda seed: None)
+    monkeypatch.setattr(trainer, "_evaluate", lambda model, batches: {
+        "eval_loss": 1.0, "perplexity": 2.7, "eval_tokens": 10})
+    monkeypatch.setattr(trainer_unsloth, "save_unsloth", lambda *a, **k: None)
+
+    monkeypatch.setattr(trainer, "_load_and_encode", _fake_load_and_encode())
+    monkeypatch.setattr(trainer, "_baseline_eval",
+                         lambda tokenizer, model, eval_enc, r, device, on_progress:
+                         ([], {"eval_loss": 2.0, "perplexity": 7.4, "eval_tokens": 10}))
+    monkeypatch.setattr(trainer, "_wrap_unsloth", lambda model, r, spec: model)
+
+    result = trainer.run_finetune(
+        spec, [], [], {"adapter_dir": "/x", "merged_dir": "/y"}, lambda *a, **k: None)
+
+    assert result["engine"] == "unsloth"
+    assert result["engine_fallback_reason"] is None
+    # The 4-BIT mirror trained — those are the actual weights — not the
+    # 16-bit pair, even though both pins are present on this spec.
+    assert result["trained_repo"] == spec.unsloth_4bit_repo
+    assert result["trained_revision"] == spec.unsloth_4bit_revision
+    assert result["trained_repo"] != spec.unsloth_repo
+
+
+def test_success_path_non_4bit_uses_16bit_pin_even_when_4bit_pin_also_present(
+        monkeypatch, fake_torch):
+    raw = {**RAW_SPEC_4BIT_PIN, "recipe": {**RAW_SPEC_4BIT_PIN["recipe"], "load_in_4bit": False}}
+    spec = parse_spec(raw)
+    assert spec.recipe.load_in_4bit is False
+    assert spec.unsloth_4bit_repo is not None  # both pins present...
+
+    monkeypatch.setattr(trainer, "_set_all_seeds", lambda seed: None)
+    monkeypatch.setattr(trainer, "_evaluate", lambda model, batches: {
+        "eval_loss": 1.0, "perplexity": 2.7, "eval_tokens": 10})
+    monkeypatch.setattr(trainer_unsloth, "save_unsloth", lambda *a, **k: None)
+
+    monkeypatch.setattr(trainer, "_load_and_encode", _fake_load_and_encode())
+    monkeypatch.setattr(trainer, "_baseline_eval",
+                         lambda tokenizer, model, eval_enc, r, device, on_progress:
+                         ([], {"eval_loss": 2.0, "perplexity": 7.4, "eval_tokens": 10}))
+    monkeypatch.setattr(trainer, "_wrap_unsloth", lambda model, r, spec: model)
+
+    result = trainer.run_finetune(
+        spec, [], [], {"adapter_dir": "/x", "merged_dir": "/y"}, lambda *a, **k: None)
+
+    # ...but a non-4bit run must use the 16-bit pair, not the 4-bit one.
+    assert result["trained_repo"] == spec.unsloth_repo
+    assert result["trained_revision"] == spec.unsloth_revision
+
+
+# --- trainer_unsloth.load_unsloth: resolves the pin matching load_in_4bit --
+
+class _FakeUnslothTokenizer:
+    pad_token_id = 0
+
+
+class _CapturingFastLanguageModel:
+    def __init__(self, captured):
+        self._captured = captured
+
+    def from_pretrained(self, **kwargs):
+        self._captured.update(kwargs)
+        return object(), _FakeUnslothTokenizer()
+
+
+def test_load_unsloth_asks_for_the_4bit_repo_and_sha_when_load_in_4bit_true(monkeypatch):
+    spec = _spec_4bit_pin()
+    assert spec.recipe.load_in_4bit is True
+
+    captured = {}
+    fake_unsloth_module = types.SimpleNamespace(
+        FastLanguageModel=_CapturingFastLanguageModel(captured))
+    monkeypatch.setitem(sys.modules, "unsloth", fake_unsloth_module)
+
+    trainer_unsloth.load_unsloth(spec, dtype_hint=None)
+
+    assert captured["model_name"] == spec.unsloth_4bit_repo
+    assert captured["revision"] == spec.unsloth_4bit_revision
+    assert captured["model_name"] != spec.unsloth_repo  # never the 16-bit mirror
+    assert captured["load_in_4bit"] is True
+
+
+def test_load_unsloth_asks_for_the_16bit_repo_and_sha_when_load_in_4bit_false(monkeypatch):
+    raw = {**RAW_SPEC_4BIT_PIN, "recipe": {**RAW_SPEC_4BIT_PIN["recipe"], "load_in_4bit": False}}
+    spec = parse_spec(raw)
+    assert spec.recipe.load_in_4bit is False
+
+    captured = {}
+    fake_unsloth_module = types.SimpleNamespace(
+        FastLanguageModel=_CapturingFastLanguageModel(captured))
+    monkeypatch.setitem(sys.modules, "unsloth", fake_unsloth_module)
+
+    trainer_unsloth.load_unsloth(spec, dtype_hint=None)
+
+    assert captured["model_name"] == spec.unsloth_repo
+    assert captured["revision"] == spec.unsloth_revision
+    assert captured["load_in_4bit"] is False

@@ -13,6 +13,7 @@ import os
 import shutil
 
 from .errors import InfraError, attach_context
+from .trainer import unsloth_pin_for
 
 
 def load_unsloth(spec, dtype_hint):
@@ -25,34 +26,51 @@ def load_unsloth(spec, dtype_hint):
     unsloth is left to auto-select (dtype=None is its own "autodetect" value,
     matching what the vanilla loader would have picked on this box anyway).
 
-    model_name/revision are spec.unsloth_repo/spec.unsloth_revision — NEVER
-    spec.hf_repo/spec.hf_revision. Live GPU smoke (2026-08-25) proved
+    model_name/revision come from unsloth_pin_for(spec, spec.recipe.load_in_4bit)
+    — NEVER spec.hf_repo/spec.hf_revision, and never spec.unsloth_repo/
+    spec.unsloth_revision directly either, because which pin applies depends
+    on load_in_4bit. Live GPU smoke (2026-08-25) proved
     FastLanguageModel.from_pretrained SILENTLY remaps a canonical repo name
     (e.g. "Qwen/Qwen2.5-0.5B-Instruct") to unsloth's own mirror namespace
     ("unsloth/Qwen2.5-0.5B-Instruct") but still applies whatever revision it
     was handed — and that sha is the CANONICAL repo's, which does not exist in
     the mirror repo, so the load failed with "AutoConfig error: Unrecognized
-    model in unsloth/Qwen2.5-0.5B-Instruct". Passing the mirror's OWN
-    repo+revision (validated as a matched pair in spec.py, and required by
-    trainer.py's unsloth_pin_ok before this function is ever called) makes
-    unsloth's internal remap a no-op: the name it resolves to is the name we
-    already gave it, and the revision is that mirror's own sha — never a
-    surprise substitution.
+    model in unsloth/Qwen2.5-0.5B-Instruct". The SAME bug bites one level
+    deeper under QLoRA: with load_in_4bit=True, unsloth remaps to a THIRD
+    repo — a dedicated pre-quantized "-unsloth-bnb-4bit" mirror — and again
+    applies whatever revision it was given, which belongs to neither the
+    canonical repo nor the 16-bit mirror. Live GPU smoke against
+    unsloth/qwen2.5-0.5b-instruct-unsloth-bnb-4bit reproduced this exactly:
+    "does not appear to have a file named pytorch_model.bin". Passing the
+    resolved mirror's OWN repo+revision (validated as a matched pair in
+    spec.py, and required by trainer.py's unsloth_pin_for before this
+    function is ever called) makes unsloth's internal remap a no-op: the name
+    it resolves to is the name we already gave it, and the revision is that
+    mirror's own sha — never a surprise substitution.
     """
     from unsloth import FastLanguageModel
 
+    # Guaranteed non-None: the caller (run_finetune's forced-unsloth and auto
+    # branches in trainer.py) never reaches this load without first confirming
+    # unsloth_pin_for(spec, load_in_4bit) is not None. Asserting here — rather
+    # than trusting that silently — means a future caller that skips the gate
+    # fails loudly right here instead of via a confusing AttributeError deep
+    # inside from_pretrained.
+    pin = unsloth_pin_for(spec, spec.recipe.load_in_4bit)
+    assert pin is not None, "load_unsloth called without a resolved mirror pin"
+    repo, revision = pin
+
     try:
         model, tokenizer = FastLanguageModel.from_pretrained(
-            model_name=spec.unsloth_repo,
-            revision=spec.unsloth_revision,
+            model_name=repo,
+            revision=revision,
             max_seq_length=spec.recipe.max_seq_len,
             load_in_4bit=spec.recipe.load_in_4bit,
             dtype=None,
         )
     except Exception as e:
         raise attach_context(
-            e,
-            engine="unsloth", trained_repo=spec.unsloth_repo, trained_revision=spec.unsloth_revision) from e
+            e, engine="unsloth", trained_repo=repo, trained_revision=revision) from e
     if tokenizer.pad_token_id is None:
         tokenizer.pad_token = tokenizer.eos_token
     return model, tokenizer
@@ -77,9 +95,14 @@ def wrap_unsloth_lora(model, recipe, spec):
             random_state=recipe.seed,
         )
     except Exception as e:
+        # Report whichever pin actually applies (16-bit or 4-bit) rather than
+        # always the 16-bit pair — see unsloth_pin_for. Falls back to (None,
+        # None) rather than crashing on an unexpected None here, which would
+        # mask the real exception being handled.
+        pin = unsloth_pin_for(spec, recipe.load_in_4bit)
+        repo, revision = pin if pin is not None else (None, None)
         raise attach_context(
-            e,
-            engine="unsloth", trained_repo=spec.unsloth_repo, trained_revision=spec.unsloth_revision) from e
+            e, engine="unsloth", trained_repo=repo, trained_revision=revision) from e
 
 
 def save_unsloth(model, tokenizer, out_dirs, load_in_4bit, spec) -> None:
@@ -116,6 +139,13 @@ def save_unsloth(model, tokenizer, out_dirs, load_in_4bit, spec) -> None:
         # recipe. Never leave a half-written merged_dir for a retry to tar up
         # as if it were a complete artifact.
         shutil.rmtree(out_dirs["merged_dir"], ignore_errors=True)
+        # Report whichever pin actually trained (16-bit or 4-bit) — see
+        # unsloth_pin_for. save_unsloth is handed load_in_4bit directly
+        # (rather than spec.recipe.load_in_4bit) so this stays correct even if
+        # a future caller ever needs to report on a recipe it didn't itself
+        # train with.
+        pin = unsloth_pin_for(spec, load_in_4bit)
+        repo, revision = pin if pin is not None else (None, None)
         raise attach_context(
             InfraError(f"[engine=unsloth] artifact save failed: {e}"),
-            engine="unsloth", trained_repo=spec.unsloth_repo, trained_revision=spec.unsloth_revision) from e
+            engine="unsloth", trained_repo=repo, trained_revision=revision) from e

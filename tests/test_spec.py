@@ -252,3 +252,110 @@ def test_unsloth_mirror_pin_strips_whitespace():
     s = parse_spec(raw)
     assert s.unsloth_repo == "unsloth/Qwen2.5-0.5B-Instruct"
     assert s.unsloth_revision == "ae616882a38b36759fc46ac3fd6769498833b913"
+
+
+# --- unsloth_4bit_repo/unsloth_4bit_revision: the QLoRA mirror pin ----------
+# Live GPU smoke (2026-08-25) proved unsloth's remap goes one level deeper
+# under load_in_4bit=True: it resolves to a THIRD repo — a dedicated
+# pre-quantized "-unsloth-bnb-4bit" mirror, distinct from both the canonical
+# repo and the 16-bit unsloth mirror above — and again applies whatever
+# revision it was given. This pair pins that mirror, independently, with the
+# same strict both-or-neither validation as unsloth_repo/unsloth_revision.
+
+def test_unsloth_4bit_mirror_pin_absent_by_default():
+    s = parse_spec(BASE)
+    assert s.unsloth_4bit_repo is None
+    assert s.unsloth_4bit_revision is None
+
+
+def test_unsloth_4bit_mirror_pin_parses_when_both_present():
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_4bit_repo": "unsloth/Qwen2.5-0.5B-Instruct-unsloth-bnb-4bit",
+        "unsloth_4bit_revision": "10413c288cb9629acdf60b3e0229f3ba75efe413",
+    }}
+    s = parse_spec(raw)
+    assert s.unsloth_4bit_repo == "unsloth/Qwen2.5-0.5B-Instruct-unsloth-bnb-4bit"
+    assert s.unsloth_4bit_revision == "10413c288cb9629acdf60b3e0229f3ba75efe413"
+
+
+def test_unsloth_4bit_mirror_pin_independent_of_16bit_pin():
+    """Both pins can be present at once and needn't agree — they pin two
+    different mirror repos entirely."""
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_repo": "unsloth/Qwen2.5-0.5B-Instruct",
+        "unsloth_revision": "ae616882a38b36759fc46ac3fd6769498833b913",
+        "unsloth_4bit_repo": "unsloth/Qwen2.5-0.5B-Instruct-unsloth-bnb-4bit",
+        "unsloth_4bit_revision": "10413c288cb9629acdf60b3e0229f3ba75efe413",
+    }}
+    s = parse_spec(raw)
+    assert s.unsloth_repo == "unsloth/Qwen2.5-0.5B-Instruct"
+    assert s.unsloth_4bit_repo == "unsloth/Qwen2.5-0.5B-Instruct-unsloth-bnb-4bit"
+    assert s.unsloth_repo != s.unsloth_4bit_repo
+    assert s.unsloth_revision != s.unsloth_4bit_revision
+
+
+def test_unsloth_4bit_mirror_pin_rejects_repo_without_revision():
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_4bit_repo": "unsloth/Qwen2.5-0.5B-Instruct-unsloth-bnb-4bit"}}
+    with pytest.raises(SpecError, match="must both be present or both be absent"):
+        parse_spec(raw)
+
+
+def test_unsloth_4bit_mirror_pin_rejects_revision_without_repo():
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_4bit_revision": "10413c288cb9629acdf60b3e0229f3ba75efe413"}}
+    with pytest.raises(SpecError, match="must both be present or both be absent"):
+        parse_spec(raw)
+
+
+@pytest.mark.parametrize("empty", ["", "   "])
+def test_unsloth_4bit_mirror_pin_rejects_empty_string(empty):
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"], "unsloth_4bit_repo": empty, "unsloth_4bit_revision": empty}}
+    with pytest.raises(SpecError, match="must be a non-empty string when present"):
+        parse_spec(raw)
+
+
+@pytest.mark.parametrize("non_string", [0, 1, 0.0, [], {}, True, False])
+def test_unsloth_4bit_repo_non_string_raises(non_string):
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_4bit_repo": non_string,
+        "unsloth_4bit_revision": "10413c288cb9629acdf60b3e0229f3ba75efe413",
+    }}
+    with pytest.raises(SpecError, match="must be a non-empty string when present"):
+        parse_spec(raw)
+
+
+@pytest.mark.parametrize("non_string", [0, 1, 0.0, [], {}, True, False])
+def test_unsloth_4bit_revision_non_string_raises(non_string):
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_4bit_repo": "unsloth/Qwen2.5-0.5B-Instruct-unsloth-bnb-4bit",
+        "unsloth_4bit_revision": non_string,
+    }}
+    with pytest.raises(SpecError, match="must be a non-empty string when present"):
+        parse_spec(raw)
+
+
+def test_unsloth_4bit_mirror_pin_absent_via_null_or_missing():
+    """Only a missing key or an explicit null means 'no pin'."""
+    for bm in ({**BASE["base_model"]},
+               {**BASE["base_model"], "unsloth_4bit_repo": None, "unsloth_4bit_revision": None}):
+        s = parse_spec({**BASE, "base_model": bm})
+        assert s.unsloth_4bit_repo is None and s.unsloth_4bit_revision is None
+
+
+def test_unsloth_4bit_mirror_pin_strips_whitespace():
+    raw = {**BASE, "base_model": {
+        **BASE["base_model"],
+        "unsloth_4bit_repo": "  unsloth/Qwen2.5-0.5B-Instruct-unsloth-bnb-4bit  ",
+        "unsloth_4bit_revision": "\n 10413c288cb9629acdf60b3e0229f3ba75efe413 \t",
+    }}
+    s = parse_spec(raw)
+    assert s.unsloth_4bit_repo == "unsloth/Qwen2.5-0.5B-Instruct-unsloth-bnb-4bit"
+    assert s.unsloth_4bit_revision == "10413c288cb9629acdf60b3e0229f3ba75efe413"

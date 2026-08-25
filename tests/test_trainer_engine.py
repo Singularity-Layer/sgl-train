@@ -8,7 +8,8 @@ import pytest
 
 from runner.errors import InfraError
 from runner.trainer import (_attempt_engine, _model_dtype, normalize_engine_mode,
-                             require_engine_for_recipe, resolve_engine, unsloth_pin_ok)
+                             require_engine_for_recipe, resolve_engine, unsloth_pin_for,
+                             unsloth_pin_ok)
 
 
 @pytest.mark.parametrize("probe", [True, False])
@@ -178,6 +179,59 @@ def test_unsloth_pin_ok_false_when_only_one_field_present(repo, revision):
     # trusting that invariant blindly.
     spec = types.SimpleNamespace(unsloth_repo=repo, unsloth_revision=revision)
     assert unsloth_pin_ok(spec) is False
+
+
+# --- unsloth_pin_for: per-load_in_4bit mirror pin selection ----------------
+# See runner/trainer_unsloth.py's load_unsloth docstring: load_in_4bit=True
+# remaps to a THIRD repo (a dedicated pre-quantized "-unsloth-bnb-4bit"
+# mirror), distinct from both the canonical repo and the 16-bit unsloth
+# mirror unsloth_pin_ok checks. This is used by both the decision layer
+# (run_finetune, below) and the loader (trainer_unsloth.load_unsloth) so the
+# two can never disagree about which pin applies.
+
+def _pinned_spec(repo_16bit="unsloth/M", revision_16bit="16bit-sha",
+                  repo_4bit="unsloth/M-unsloth-bnb-4bit", revision_4bit="4bit-sha"):
+    return types.SimpleNamespace(
+        unsloth_repo=repo_16bit, unsloth_revision=revision_16bit,
+        unsloth_4bit_repo=repo_4bit, unsloth_4bit_revision=revision_4bit)
+
+
+def test_unsloth_pin_for_returns_16bit_pair_when_load_in_4bit_false():
+    spec = _pinned_spec()
+    assert unsloth_pin_for(spec, False) == ("unsloth/M", "16bit-sha")
+
+
+def test_unsloth_pin_for_returns_4bit_pair_when_load_in_4bit_true():
+    spec = _pinned_spec()
+    assert unsloth_pin_for(spec, True) == ("unsloth/M-unsloth-bnb-4bit", "4bit-sha")
+
+
+def test_unsloth_pin_for_none_when_4bit_pin_absent_even_if_16bit_pin_present():
+    spec = _pinned_spec(repo_4bit=None, revision_4bit=None)
+    assert unsloth_pin_for(spec, True) is None
+    # The 16-bit pin is irrelevant to a 4-bit request and vice versa — the
+    # whole point of two independent pins.
+    assert unsloth_pin_for(spec, False) == ("unsloth/M", "16bit-sha")
+
+
+def test_unsloth_pin_for_none_when_16bit_pin_absent_even_if_4bit_pin_present():
+    spec = _pinned_spec(repo_16bit=None, revision_16bit=None)
+    assert unsloth_pin_for(spec, False) is None
+    assert unsloth_pin_for(spec, True) == ("unsloth/M-unsloth-bnb-4bit", "4bit-sha")
+
+
+def test_unsloth_pin_for_none_when_both_pins_absent():
+    spec = _pinned_spec(repo_16bit=None, revision_16bit=None, repo_4bit=None, revision_4bit=None)
+    assert unsloth_pin_for(spec, False) is None
+    assert unsloth_pin_for(spec, True) is None
+
+
+def test_unsloth_pin_ok_stays_in_lockstep_with_unsloth_pin_for_false():
+    # unsloth_pin_ok is kept only for the 16-bit call sites; it must delegate
+    # to unsloth_pin_for(spec, False) rather than re-implementing its own
+    # check, so the two can't quietly drift apart.
+    spec = _pinned_spec(repo_4bit=None, revision_4bit=None)
+    assert unsloth_pin_ok(spec) is (unsloth_pin_for(spec, False) is not None) is True
 
 
 def test_model_dtype_uses_str_of_the_dtype_object_not_just_first_field():

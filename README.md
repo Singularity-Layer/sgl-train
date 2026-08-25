@@ -78,6 +78,35 @@ unsloth engine is simply never attempted:
 - `SGL_ENGINE=unsloth` (forced) with no mirror pin → `InfraError` → exit `6`
   (refundable: this is our capability gap, not the buyer's).
 
+### The QLoRA mirror pin (`base_model.unsloth_4bit_repo` / `unsloth_4bit_revision`)
+
+Live GPU smoke (2026-08-25) proved the remap above goes one level deeper
+under `recipe.load_in_4bit=true`: unsloth doesn't reuse the 16-bit mirror,
+it resolves to a **third, dedicated pre-quantized repo** (the
+`-unsloth-bnb-4bit` namespace, e.g.
+`unsloth/Qwen2.5-0.5B-Instruct-unsloth-bnb-4bit`) and again applies whatever
+`revision` it was handed — which belongs to neither the canonical repo nor
+the 16-bit mirror. The failure looked like: `unsloth/qwen2.5-0.5b-instruct-
+unsloth-bnb-4bit does not appear to have a file named pytorch_model.bin`.
+
+QLoRA therefore needs its **own, independent** optional both-or-neither pin:
+
+```json
+"base_model": {
+  "hf_repo": "Qwen/Qwen2.5-0.5B-Instruct",
+  "revision": "<canonical repo sha>",
+  "unsloth_repo": "unsloth/Qwen2.5-0.5B-Instruct",
+  "unsloth_revision": "<the 16-bit MIRROR's own sha>",
+  "unsloth_4bit_repo": "unsloth/Qwen2.5-0.5B-Instruct-unsloth-bnb-4bit",
+  "unsloth_4bit_revision": "<the 4-BIT MIRROR's own sha>"
+}
+```
+
+The 16-bit pin does **not** cover 4-bit runs and vice versa — both can be
+present at once (a spec that supports both training modes pins both), but
+each is validated and consulted independently. Same both-or-neither /
+non-empty-string strictness as the 16-bit pair.
+
 ### QLoRA (`recipe.load_in_4bit`)
 
 `recipe.load_in_4bit` (default `false`) requests 4-bit (QLoRA) training. It's
@@ -86,6 +115,18 @@ strict-parsed: only JSON `true`/`false` are accepted, anything else is a
 and the run resolves to vanilla (unsloth unavailable in `auto`, or `vanilla`
 forced explicitly), the run raises `InfraError` and exits `6` (refundable:
 this is a capability gap on our box, never the buyer's fault).
+
+4-bit training with **no 4-bit mirror pin** is *also* a refundable
+`InfraError`, in both `auto` and forced `unsloth` mode — **not** a silent
+downgrade to vanilla or to the 16-bit mirror. Vanilla cannot do 4-bit at all,
+so there is nothing safe to fall back to, and running an unpinned load
+anyway risks exactly the silent-remap bug above. Having the 16-bit pin
+present does not help here — it is a different repo:
+
+- `SGL_ENGINE=auto` + `load_in_4bit=true` + no 4-bit pin → `InfraError`
+  immediately (no vanilla fallback attempted) → exit `6`.
+- `SGL_ENGINE=unsloth` (forced) + `load_in_4bit=true` + no 4-bit pin →
+  `InfraError` → exit `6`.
 
 ## Exit codes
 

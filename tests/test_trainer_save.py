@@ -36,6 +36,8 @@ class _FakeSpec:
         self.hf_revision = "sha"
         self.unsloth_repo = "unsloth/M"
         self.unsloth_revision = "unsloth-sha"
+        self.unsloth_4bit_repo = "unsloth/M-unsloth-bnb-4bit"
+        self.unsloth_4bit_revision = "unsloth-4bit-sha"
 
 
 def _spec():
