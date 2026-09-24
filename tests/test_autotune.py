@@ -226,3 +226,50 @@ def test_bad_spec_autotune_never_touches_the_gpu():
     deps, calls = make(rep, [1.0])
     assert execute(spec(trials=[]), deps) == EXIT_SPEC
     assert calls["train"] == []
+
+
+def test_trial_one_that_cannot_fit_is_refused_as_our_fault_before_training():
+    rep = Rep()
+    deps, calls = make(rep, [1.0])
+    code = execute(spec(budget_seconds=900, trial_estimate_seconds=600, reserve_seconds=600), deps)
+    assert code == EXIT_SPEC
+    assert calls["train"] == []
+    assert rep.results[-1][1]["exit_code"] == EXIT_SPEC
+
+
+def test_final_stage_always_retars_never_trusts_a_partial_file():
+    rep = Rep()
+    tars = []
+    deps, _ = make(rep, [1.5], tar=lambda src, dest: tars.append(dest) or dest)
+    assert execute(spec(trials=[TRIALS[0]]), deps) == EXIT_OK
+    assert len(tars) == 2   # best-so-far + mandatory final re-tar
+
+
+def test_final_reupload_failure_is_success_when_that_best_was_already_delivered():
+    rep = Rep()
+    n = {"adapter": 0}
+
+    def upload(url, path):
+        if url == "https://a.invalid":
+            n["adapter"] += 1
+            return n["adapter"] == 1   # best-so-far ok, final re-upload fails
+        return True
+
+    deps, _ = make(rep, [1.5], upload=upload)
+    assert execute(spec(trials=[TRIALS[0]]), deps) == EXIT_OK
+    assert rep.results[-1][0] == "completed"
+
+
+def test_final_upload_failure_when_best_never_delivered_is_exit_upload():
+    rep = Rep()
+    # trial 1 delivered, trial 2 improves but its best-so-far AND final uploads fail
+    n = {"adapter": 0}
+
+    def upload(url, path):
+        if url == "https://a.invalid":
+            n["adapter"] += 1
+            return n["adapter"] == 1
+        return True
+
+    deps, _ = make(rep, [1.5, 1.2], upload=upload)
+    assert execute(spec(trials=TRIALS[:2]), deps) == EXIT_UPLOAD

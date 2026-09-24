@@ -247,7 +247,16 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
         return EXIT_DATA
 
     n = len(at.trials)
+    # Trial 1 must fit too. The backend refuses such a block before charging,
+    # so reaching this means the backend authored an impossible budget: our
+    # fault, refunded (exit 2), rather than starting work the deadline kills
+    # before any model exists.
+    if at.trial_estimate_seconds + at.reserve_seconds > at.budget_seconds:
+        rep.result("failed", {"error": "spec: auto-tune budget cannot fit a single trial",
+                              "exit_code": EXIT_SPEC, "autotune": True})
+        return EXIT_SPEC
     trials: list[dict] = []
+    delivered_idx: int | None = None   # trial whose adapter is already at the adapter URL
     best: dict | None = None
     best_dirs: dict | None = None
     last_wall: float | None = None
@@ -302,7 +311,9 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
             # Insurance: the best adapter so far is already delivered.
             try:
                 deps.tar(tdirs["adapter_dir"], tdirs["adapter_tar"])
-                if not deps.upload(spec.artifact_urls["adapter"], tdirs["adapter_tar"]):
+                if deps.upload(spec.artifact_urls["adapter"], tdirs["adapter_tar"]):
+                    delivered_idx = idx
+                else:
                     print(f"[sgl] best-so-far adapter upload failed (trial {idx})", file=sys.stderr)
             except Exception as e:  # noqa: BLE001
                 print(f"[sgl] best-so-far adapter stage failed (trial {idx}): {e}", file=sys.stderr)
@@ -376,11 +387,13 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
 
     try:
         rep.progress("uploading", 0.97)
-        if not os.path.exists(best_dirs["adapter_tar"]):
-            deps.tar(best_dirs["adapter_dir"], best_dirs["adapter_tar"])
-        # Re-upload is idempotent (same key); it guarantees the final adapter
-        # even if the best-so-far upload above failed.
-        if not deps.upload(spec.artifact_urls["adapter"], best_dirs["adapter_tar"]):
+        # ALWAYS re-tar: a best-so-far tar that failed midway can leave a
+        # partial file, and "the file exists" must never be read as "complete".
+        deps.tar(best_dirs["adapter_dir"], best_dirs["adapter_tar"])
+        # Re-upload is idempotent (same key). If it fails but this exact best
+        # trial was already delivered by the best-so-far upload, the buyer HAS
+        # the model: that is a success, not a refundable upload failure.
+        if not deps.upload(spec.artifact_urls["adapter"], best_dirs["adapter_tar"]) and delivered_idx != best["idx"]:
             rep.result("failed", {"error": "adapter upload failed", "exit_code": EXIT_UPLOAD, **report})
             return EXIT_UPLOAD
         if gguf_ok and not deps.upload(spec.artifact_urls["gguf"], best_dirs["gguf"]):
