@@ -387,15 +387,18 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
 
     try:
         rep.progress("uploading", 0.97)
-        # ALWAYS re-tar: a best-so-far tar that failed midway can leave a
-        # partial file, and "the file exists" must never be read as "complete".
-        deps.tar(best_dirs["adapter_dir"], best_dirs["adapter_tar"])
-        # Re-upload is idempotent (same key). If it fails but this exact best
-        # trial was already delivered by the best-so-far upload, the buyer HAS
-        # the model: that is a success, not a refundable upload failure.
-        if not deps.upload(spec.artifact_urls["adapter"], best_dirs["adapter_tar"]) and delivered_idx != best["idx"]:
-            rep.result("failed", {"error": "adapter upload failed", "exit_code": EXIT_UPLOAD, **report})
-            return EXIT_UPLOAD
+        if delivered_idx != best["idx"]:
+            # The winner is NOT yet at the adapter URL (its best-so-far upload
+            # failed). Re-tar from scratch (a tar that failed midway can leave a
+            # partial file; "exists" never means "complete"), then upload.
+            deps.tar(best_dirs["adapter_dir"], best_dirs["adapter_tar"])
+            if not deps.upload(spec.artifact_urls["adapter"], best_dirs["adapter_tar"]):
+                rep.result("failed", {"error": "adapter upload failed", "exit_code": EXIT_UPLOAD, **report})
+                return EXIT_UPLOAD
+        # else: the winner's adapter was already uploaded, from exactly the file
+        # still on disk (the upload only ran after its tar succeeded). Touching it
+        # again could only fail a delivered run or make the hash below describe
+        # bytes that were never uploaded.
         if gguf_ok and not deps.upload(spec.artifact_urls["gguf"], best_dirs["gguf"]):
             gguf_ok, gguf_error = False, "gguf upload failed"
             report["gguf_ok"], report["gguf_error"] = False, gguf_error

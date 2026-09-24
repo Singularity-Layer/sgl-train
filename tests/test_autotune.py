@@ -152,8 +152,8 @@ def test_best_so_far_adapter_uploaded_on_each_improvement():
     deps, calls = make(rep, [1.5, 1.2, 1.4])
     execute(spec(), deps)
     adapter_uploads = [p for (u, p) in calls["upload"] if u == "https://a.invalid"]
-    # trial1 (first best), trial2 (improved), final re-upload of trial2
-    assert [p.split("/")[-2] for p in adapter_uploads] == ["r1-t1", "r1-t2", "r1-t2"]
+    # trial1 (first best), trial2 (improved); trial2 was delivered, so no final re-upload
+    assert [p.split("/")[-2] for p in adapter_uploads] == ["r1-t1", "r1-t2"]
 
 
 def test_a_failed_trial_does_not_fail_the_run():
@@ -237,27 +237,43 @@ def test_trial_one_that_cannot_fit_is_refused_as_our_fault_before_training():
     assert rep.results[-1][1]["exit_code"] == EXIT_SPEC
 
 
-def test_final_stage_always_retars_never_trusts_a_partial_file():
+def test_delivered_best_is_not_retarred_or_reuploaded():
     rep = Rep()
     tars = []
-    deps, _ = make(rep, [1.5], tar=lambda src, dest: tars.append(dest) or dest)
+    deps, calls = make(rep, [1.5], tar=lambda src, dest: tars.append(dest) or dest)
     assert execute(spec(trials=[TRIALS[0]]), deps) == EXIT_OK
-    assert len(tars) == 2   # best-so-far + mandatory final re-tar
+    assert len(tars) == 1   # only the best-so-far tar; that exact file was uploaded and hashed
+    assert len([u for (u, _) in calls["upload"] if u == "https://a.invalid"]) == 1
 
 
-def test_final_reupload_failure_is_success_when_that_best_was_already_delivered():
+def test_undelivered_best_is_retarred_from_scratch_then_uploaded():
     rep = Rep()
+    tars = []
     n = {"adapter": 0}
 
     def upload(url, path):
         if url == "https://a.invalid":
             n["adapter"] += 1
-            return n["adapter"] == 1   # best-so-far ok, final re-upload fails
+            return n["adapter"] != 1   # best-so-far upload fails, final succeeds
         return True
 
-    deps, _ = make(rep, [1.5], upload=upload)
+    deps, _ = make(rep, [1.5], tar=lambda src, dest: tars.append(dest) or dest, upload=upload)
     assert execute(spec(trials=[TRIALS[0]]), deps) == EXIT_OK
-    assert rep.results[-1][0] == "completed"
+    assert len(tars) == 2
+
+
+def test_no_final_tar_after_delivery_so_a_tar_error_cannot_refund_a_delivered_run():
+    rep = Rep()
+    n = {"tar": 0}
+
+    def tar(src, dest):
+        n["tar"] += 1
+        if n["tar"] > 1:
+            raise OSError("disk full")
+        return dest
+
+    deps, _ = make(rep, [1.5], tar=tar)
+    assert execute(spec(trials=[TRIALS[0]]), deps) == EXIT_OK
 
 
 def test_final_upload_failure_when_best_never_delivered_is_exit_upload():
