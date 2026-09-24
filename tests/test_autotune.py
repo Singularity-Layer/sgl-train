@@ -289,3 +289,28 @@ def test_final_upload_failure_when_best_never_delivered_is_exit_upload():
 
     deps, _ = make(rep, [1.5, 1.2], upload=upload)
     assert execute(spec(trials=TRIALS[:2]), deps) == EXIT_UPLOAD
+
+
+def test_report_write_failure_after_delivery_is_still_success():
+    rep = Rep()
+
+    def boom(p, o):
+        raise OSError("disk full")
+
+    deps, _ = make(rep, [1.5], write_report=boom)
+    assert execute(spec(trials=[TRIALS[0]]), deps) == EXIT_OK
+    assert rep.results[-1][0] == "completed"
+
+
+def test_gguf_upload_raising_after_delivery_marks_gguf_unavailable_not_failed():
+    rep = Rep()
+
+    def upload(url, path):
+        if url == "https://g.invalid":
+            raise OSError("reset")
+        return True
+
+    deps, _ = make(rep, [1.5], upload=upload)
+    assert execute(spec(trials=[TRIALS[0]]), deps) == EXIT_OK
+    payload = rep.results[-1][1]
+    assert payload["gguf_ok"] is False and "gguf_sha256" not in payload

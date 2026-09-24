@@ -340,3 +340,13 @@ def test_exception_without_attached_context_does_not_crash():
     payload = rep.results[-1][1]
     assert payload["error"] == "training failed: bare exception"
     assert "engine" not in payload or payload.get("engine") is None
+
+
+def test_plain_run_report_write_failure_after_adapter_delivery_is_success():
+    rep = SpyReporter()
+
+    def boom(p, o):
+        raise OSError("disk full")
+
+    assert execute(BASE, make_deps(rep, write_report=boom)) == EXIT_OK
+    assert rep.results[-1][0] == "completed"

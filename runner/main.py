@@ -157,33 +157,49 @@ def execute(raw_spec: dict, deps: Deps) -> int:
         "trained_revision": outcome.get("trained_revision"),
     }
 
+    # The ADAPTER is what the buyer pays for. Only a failure to deliver it is
+    # a failed (refundable, exit 5) run. Everything after it is optional and
+    # can never turn a delivered run into a failure (_deliver_extras).
     try:
         rep.progress("uploading", 0.97)
         deps.tar(dirs["adapter_dir"], dirs["adapter_tar"])
-        if not deps.upload(spec.artifact_urls["adapter"], dirs["adapter_tar"]):
-            rep.result("failed", {"error": "adapter upload failed", **report})
-            return EXIT_UPLOAD
-        if gguf_ok and not deps.upload(spec.artifact_urls["gguf"], dirs["gguf"]):
-            gguf_ok, gguf_error = False, "gguf upload failed"
-            report["gguf_ok"] = False
-            report["gguf_error"] = gguf_error
-        report.update(_artifact_hashes(deps, dirs, report["gguf_ok"]))
-
-        # report.json is written and uploaded LAST so it can never contradict the
-        # result callback — every fact it states is final by this point.
-        deps.write_report(dirs["report"], report)
-        # The return value is DELIBERATELY ignored: the report artifact is optional
-        # nice-to-have storage — its full content also rides the result callback
-        # below — so a failed report PUT must not fail a run whose adapter (the
-        # thing the buyer is actually paying for) was already delivered.
-        deps.upload(spec.artifact_urls["report"], dirs["report"])
-    except Exception as e:
+        adapter_ok = deps.upload(spec.artifact_urls["adapter"], dirs["adapter_tar"])
+    except Exception as e:  # noqa: BLE001
         rep.result("failed", {"error": f"artifact stage failed: {e}", **report})
         return EXIT_UPLOAD
+    if not adapter_ok:
+        rep.result("failed", {"error": "adapter upload failed", **report})
+        return EXIT_UPLOAD
+    _deliver_extras(deps, spec, dirs, dirs["report"], report)
 
     if not rep.result("completed", report):
         print(f"[sgl] WARNING: result callback delivery failed for run {spec.run_id}", file=sys.stderr)
     return EXIT_OK
+
+
+def _deliver_extras(deps: Deps, spec, art_dirs: dict, report_path: str, report: dict) -> None:
+    """Everything after the adapter is delivered: GGUF, checksums, report.json.
+    All optional, all best-effort. Mutates `report` so the result callback
+    tells the truth (e.g. gguf_ok false if its upload failed). Never raises:
+    a delivered adapter must never become a refundable failure because of an
+    extra (Codex r3)."""
+    if report.get("gguf_ok"):
+        try:
+            ok = deps.upload(spec.artifact_urls["gguf"], art_dirs["gguf"])
+        except Exception as e:  # noqa: BLE001
+            ok = False
+            print(f"[sgl] gguf upload raised: {e}", file=sys.stderr)
+        if not ok:
+            report["gguf_ok"], report["gguf_error"] = False, "gguf upload failed"
+    report.update(_artifact_hashes(deps, art_dirs, report["gguf_ok"]))
+    # report.json is written and uploaded LAST so it can never contradict the
+    # result callback. Its full content also rides that callback, so failing to
+    # store it is logged, never fatal.
+    try:
+        deps.write_report(report_path, report)
+        deps.upload(spec.artifact_urls["report"], report_path)
+    except Exception as e:  # noqa: BLE001
+        print(f"[sgl] report artifact failed (non-fatal): {e}", file=sys.stderr)
 
 
 def _artifact_hashes(deps: Deps, dirs: dict, gguf_ok: bool) -> dict:
@@ -385,29 +401,25 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
         "trained_revision": bo.get("trained_revision"),
     }
 
-    try:
-        rep.progress("uploading", 0.97)
-        if delivered_idx != best["idx"]:
-            # The winner is NOT yet at the adapter URL (its best-so-far upload
-            # failed). Re-tar from scratch (a tar that failed midway can leave a
-            # partial file; "exists" never means "complete"), then upload.
+    rep.progress("uploading", 0.97)
+    if delivered_idx != best["idx"]:
+        # The winner is NOT yet at the adapter URL (its best-so-far upload
+        # failed). Re-tar from scratch (a tar that failed midway can leave a
+        # partial file; "exists" never means "complete"), then upload.
+        try:
             deps.tar(best_dirs["adapter_dir"], best_dirs["adapter_tar"])
-            if not deps.upload(spec.artifact_urls["adapter"], best_dirs["adapter_tar"]):
-                rep.result("failed", {"error": "adapter upload failed", "exit_code": EXIT_UPLOAD, **report})
-                return EXIT_UPLOAD
-        # else: the winner's adapter was already uploaded, from exactly the file
-        # still on disk (the upload only ran after its tar succeeded). Touching it
-        # again could only fail a delivered run or make the hash below describe
-        # bytes that were never uploaded.
-        if gguf_ok and not deps.upload(spec.artifact_urls["gguf"], best_dirs["gguf"]):
-            gguf_ok, gguf_error = False, "gguf upload failed"
-            report["gguf_ok"], report["gguf_error"] = False, gguf_error
-        report.update(_artifact_hashes(deps, best_dirs, report["gguf_ok"]))
-        deps.write_report(dirs["report"], report)
-        deps.upload(spec.artifact_urls["report"], dirs["report"])
-    except Exception as e:  # noqa: BLE001
-        rep.result("failed", {"error": f"artifact stage failed: {e}", "exit_code": EXIT_UPLOAD, **report})
-        return EXIT_UPLOAD
+            adapter_ok = deps.upload(spec.artifact_urls["adapter"], best_dirs["adapter_tar"])
+        except Exception as e:  # noqa: BLE001
+            rep.result("failed", {"error": f"artifact stage failed: {e}", "exit_code": EXIT_UPLOAD, **report})
+            return EXIT_UPLOAD
+        if not adapter_ok:
+            rep.result("failed", {"error": "adapter upload failed", "exit_code": EXIT_UPLOAD, **report})
+            return EXIT_UPLOAD
+    # else: the winner's adapter was already uploaded, from exactly the file
+    # still on disk (the upload only ran after its tar succeeded). Touching it
+    # again could only fail a delivered run or make the hash describe bytes
+    # that were never uploaded.
+    _deliver_extras(deps, spec, best_dirs, dirs["report"], report)
 
     if not rep.result("completed", report):
         print(f"[sgl] WARNING: result callback delivery failed for run {spec.run_id}", file=sys.stderr)
