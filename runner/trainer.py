@@ -488,3 +488,34 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
             "device": device, "dtype": actual_dtype,
             "engine": engine, "engine_fallback_reason": engine_fallback_reason,
             "trained_repo": trained_repo, "trained_revision": trained_revision}
+
+
+def evaluate_rows(model_ref: str, revision: str | None, rows, recipe) -> dict:
+    """Token-weighted eval of a saved model (a local merged dir, or a pinned
+    hub repo@revision) on `rows`. Used by auto-tune to score the winner and
+    the untouched base on the TEST split, which no trial ever selected on —
+    so the number in the report is not inflated by the selection itself.
+    Plain transformers load: this is measurement, not training, and must not
+    depend on which engine trained the weights.
+    """
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else (
+        torch.float16 if device == "cuda" else torch.float32)
+    kw = {"revision": revision} if revision else {}
+    tokenizer = AutoTokenizer.from_pretrained(model_ref, **kw)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    model = AutoModelForCausalLM.from_pretrained(model_ref, torch_dtype=dtype, device_map=None, **kw).to(device)
+    try:
+        enc = _encode(tokenizer, rows, recipe.max_seq_len)
+        if not enc:
+            raise RuntimeError("test split produced no usable sequences after tokenization")
+        batches = list(_batched(tokenizer, enc, recipe.batch_size, device))
+        return _evaluate(model, batches)
+    finally:
+        del model
+        if device == "cuda":
+            torch.cuda.empty_cache()

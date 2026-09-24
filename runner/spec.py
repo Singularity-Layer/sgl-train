@@ -48,6 +48,28 @@ class Recipe:
 
 
 @dataclass(frozen=True)
+class Trial:
+    """One auto-tune trial: the recipe fields a sweep varies. Everything else
+    (seq len, batch, eval split, seed) is held constant so trials compare."""
+    lr: float
+    lora_rank: int
+    lora_alpha: int
+    epochs: int
+
+
+@dataclass(frozen=True)
+class Autotune:
+    trials: tuple[Trial, ...]
+    budget_seconds: int          # the prepaid block, as seen by the box
+    trial_estimate_seconds: int  # server-side estimate for trial 1 (no history yet)
+    reserve_seconds: int         # kept free for test eval + GGUF + upload
+    experiment_url: str
+
+
+MAX_TRIALS = 6
+
+
+@dataclass(frozen=True)
 class JobSpec:
     run_id: str
     kind: str
@@ -64,6 +86,7 @@ class JobSpec:
     token: str
     artifact_urls: dict[str, str]
     recipe: Recipe
+    autotune: Autotune | None = None
 
 
 def _req(d: dict, key: str, where: str) -> object:
@@ -258,6 +281,8 @@ def parse_spec(raw: dict) -> JobSpec:
     _check_url("progress_url", progress_url)
     _check_url("result_url", result_url)
 
+    autotune = _parse_autotune(raw.get("autotune"))
+
     return JobSpec(
         run_id=run_id,
         kind=kind,
@@ -274,4 +299,47 @@ def parse_spec(raw: dict) -> JobSpec:
         token=str(_req(raw, "token", "spec")),
         artifact_urls=artifact_urls,
         recipe=recipe,
+        autotune=autotune,
+    )
+
+
+def _pos_int(where: str, value: object, lo: int, hi: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise SpecError(f"autotune: '{where}' must be an integer") from None
+    if n < lo or n > hi:
+        raise SpecError(f"autotune: '{where}' must be between {lo} and {hi}")
+    return n
+
+
+def _parse_autotune(raw: object) -> Autotune | None:
+    """Absent/null = a plain single run. Present = strict: a malformed sweep is
+    a spec error (EXIT_SPEC, refunded), never silently downgraded to one trial,
+    because the buyer paid for a sweep."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise SpecError("autotune: must be an object")
+    trials_raw = raw.get("trials")
+    if not isinstance(trials_raw, list) or not (1 <= len(trials_raw) <= MAX_TRIALS):
+        raise SpecError(f"autotune: 'trials' must be a list of 1-{MAX_TRIALS} entries")
+    trials = []
+    for i, t in enumerate(trials_raw):
+        if not isinstance(t, dict):
+            raise SpecError(f"autotune: trial {i + 1} must be an object")
+        trials.append(Trial(
+            lr=_clamp("lr", t.get("lr", 2e-4)),
+            lora_rank=_clamp("lora_rank", t.get("lora_rank", 16)),
+            lora_alpha=_clamp("lora_alpha", t.get("lora_alpha", 32)),
+            epochs=_clamp("epochs", t.get("epochs", 3)),
+        ))
+    experiment_url = str(_req(raw, "experiment_url", "autotune"))
+    _check_url("autotune.experiment_url", experiment_url)
+    return Autotune(
+        trials=tuple(trials),
+        budget_seconds=_pos_int("budget_seconds", raw.get("budget_seconds"), 600, 48 * 3600),
+        trial_estimate_seconds=_pos_int("trial_estimate_seconds", raw.get("trial_estimate_seconds"), 1, 48 * 3600),
+        reserve_seconds=_pos_int("reserve_seconds", raw.get("reserve_seconds"), 0, 48 * 3600),
+        experiment_url=experiment_url,
     )

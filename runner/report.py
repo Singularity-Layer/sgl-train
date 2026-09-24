@@ -67,6 +67,13 @@ class Reporter:
         body = {"run_id": self.run_id, "phase": phase, "pct": pct, **extra}
         return self._send(self.progress_url, body, PROGRESS_ATTEMPTS)
 
+    def experiment(self, url: str, payload: dict) -> bool:
+        """One auto-tune trial record. Best-effort like progress: the full
+        trial list also rides the final result, so a dropped record loses
+        nothing that matters."""
+        body = {"run_id": self.run_id, **payload}
+        return self._send(url, body, PROGRESS_ATTEMPTS)
+
     def result(self, status: str, payload: dict) -> bool:
         body = {"run_id": self.run_id, "status": status, **payload}
         return self._send(self.result_url, body, RESULT_ATTEMPTS)
