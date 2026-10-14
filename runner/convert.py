@@ -11,12 +11,16 @@ from __future__ import annotations
 import os
 import subprocess
 
-CONVERT_SCRIPT = "/opt/llama.cpp/convert_hf_to_gguf.py"
-QUANTIZE_BIN = "/opt/sgl/bin/llama-quantize"
+RUNTIME_ROOT = os.environ.get("SGL_RUNTIME_ROOT", "/opt/sgl")
+LLAMA_ROOT = os.environ.get("SGL_LLAMA_ROOT", "/opt/llama.cpp")
+CONVERT_ROOT = os.environ.get("SGL_CONVERT_ROOT", "/opt/sgl/convert-venv")
+BIN_ROOT = os.environ.get("SGL_BIN_ROOT", "/opt/sgl/bin")
+CONVERT_SCRIPT = f"{LLAMA_ROOT}/convert_hf_to_gguf.py"
+QUANTIZE_BIN = f"{BIN_ROOT}/llama-quantize"
 # The converter's requirements pin a different torch/transformers/protobuf than
 # the training stack, so it lives in its own venv (see Dockerfile) rather than
 # the main interpreter this process runs under.
-CONVERT_PY = "/opt/sgl/convert-venv/bin/python"
+CONVERT_PY = f"{CONVERT_ROOT}/bin/python"
 
 
 class ConvertError(RuntimeError):

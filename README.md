@@ -3,6 +3,20 @@
 Turns (pinned base model + JSONL dataset) into (LoRA adapter + merged weights +
 quantized GGUF + eval report).
 
+## Volume-backed Pod startup
+
+The production image is intentionally a small private bootstrap. Heavy GPU
+dependencies are copied once from the full `v0.4.0` runtime into a Runpod
+network volume with `scripts/seed-volume-runtime.sh`. Paid Pods then mount that
+volume at `/workspace` and start through `runner.bootstrap`.
+
+The bootstrap refuses to import the training stack unless
+`/workspace/sgl-train/runtime/v0.5.0/READY.json` exactly matches its runtime
+schema and version. Job datasets and generated artifacts remain on ephemeral
+Pod storage; the shared volume contains only immutable dependencies and public
+model caches. This keeps concurrent customer jobs isolated while avoiding a
+multi-gigabyte container pull for every Pod.
+
 ## Tests (no GPU needed)
 
 ```bash
