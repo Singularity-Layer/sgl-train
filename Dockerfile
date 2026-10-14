@@ -18,7 +18,7 @@ RUN apt-get update -y \
  && apt-get install -y --no-install-recommends git curl ca-certificates \
  && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --no-cache-dir \
+RUN python3.10 -m pip install --no-cache-dir \
       "transformers==4.49.0" \
       "peft==0.14.0" \
       "trl==0.15.2" \
@@ -74,10 +74,10 @@ RUN pip install --no-cache-dir \
 #   unsloth artifact — see convert.py's docstring). --no-deps skips that
 #   resolver conflict; every other package unsloth/unsloth_zoo actually import
 #   at runtime is installed explicitly below instead of left to pip's resolver.
-RUN pip install --no-cache-dir --no-deps \
+RUN python3.10 -m pip install --no-cache-dir --no-deps \
       "unsloth==2025.3.18" \
       "unsloth_zoo==2025.3.14" \
- && pip install --no-cache-dir \
+ && python3.10 -m pip install --no-cache-dir \
       "xformers==0.0.29.post1" \
       "bitsandbytes==0.45.3" \
       "torchvision==0.20.1" \
@@ -100,14 +100,14 @@ RUN pip install --no-cache-dir --no-deps \
 # GPU-gates at import time, so that would fail in CI regardless of whether the
 # pins above are correct. The real runtime gate for unsloth itself is the
 # forced SGL_ENGINE=unsloth smoke step (GPU hardware, not this build).
-RUN python -c "import importlib.util as u; \
+RUN python3.10 -c "import importlib.util as u; \
     assert u.find_spec('unsloth'), 'unsloth not installed'; \
     assert u.find_spec('unsloth_zoo'), 'unsloth_zoo not installed'; \
     import xformers, bitsandbytes, cut_cross_entropy, diffusers, tyro; \
     from transformers import GenerationConfig, CompileConfig, HybridCache"
 
 # Fail the image build if the official base ever drifts behind its tag.
-RUN python -c "import sys, torch; \
+RUN python3.10 -c "import sys, torch; \
     assert sys.version_info >= (3, 10); \
     assert torch.__version__.split('+')[0] == '2.5.1', torch.__version__; \
     assert str(torch.version.cuda).startswith('12.4'), torch.version.cuda"
@@ -120,7 +120,7 @@ RUN git clone --depth 1 --branch ${LLAMA_CPP_TAG} \
 # Converter deps live in their OWN venv: the requirements file pins a CPU-only
 # torch + different transformers/protobuf and would CLOBBER the CUDA training
 # stack if installed into the main environment (verified against tag b9867).
-RUN python -m venv --without-pip /opt/sgl/convert-venv \
+RUN python3.10 -m venv --without-pip /opt/sgl/convert-venv \
  && curl -fsSL https://bootstrap.pypa.io/get-pip.py | /opt/sgl/convert-venv/bin/python \
  && /opt/sgl/convert-venv/bin/pip install --no-cache-dir \
       -r /opt/llama.cpp/requirements/requirements-convert_hf_to_gguf.txt
@@ -148,4 +148,4 @@ COPY runner ./runner
 COPY pyproject.toml ./
 
 # The spec arrives as SGL_JOB_SPEC. No secrets are baked into this image.
-ENTRYPOINT ["python", "-m", "runner.main"]
+ENTRYPOINT ["python3.10", "-m", "runner.main"]
