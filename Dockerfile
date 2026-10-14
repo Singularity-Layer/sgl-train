@@ -26,7 +26,8 @@ RUN python3.10 -m pip install --no-cache-dir \
       "accelerate==1.4.0" \
       "sentencepiece==0.2.0" \
       "protobuf==5.28.3" \
-      "gguf==0.10.0"
+      "gguf==0.10.0" \
+      "runpod==1.12.0"
 
 # --- Unsloth engine (optional) -----------------------------------------------
 # trainer.py TRIES this at runtime (SGL_ENGINE=auto, the default) and falls
@@ -148,4 +149,4 @@ COPY runner ./runner
 COPY pyproject.toml ./
 
 # The spec arrives as SGL_JOB_SPEC. No secrets are baked into this image.
-ENTRYPOINT ["python3.10", "-m", "runner.main"]
+ENTRYPOINT ["python3.10", "-m", "runner.serverless"]
