@@ -34,7 +34,7 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/singularity-layer/sgl-train:v0.3.1
+            ghcr.io/singularity-layer/sgl-train:v0.3.2
             ghcr.io/singularity-layer/sgl-train:${{ github.sha }}
       - name: Print digest to pin in the backend
         run: echo "PIN THIS DIGEST → ${{ steps.push.outputs.digest }}"
