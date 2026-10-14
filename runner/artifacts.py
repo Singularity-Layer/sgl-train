@@ -11,7 +11,7 @@ import tarfile
 import urllib.error
 import urllib.request
 
-WORKDIR = "/opt/sgl/work"
+WORKDIR = os.environ.get("SGL_WORKDIR", "/opt/sgl/work")
 
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]+")
 
