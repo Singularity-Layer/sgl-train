@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "sgl-train-runner"
-version = "0.3.2"
+version = "0.4.0"
 description = "On-box runner for Singularity Layer managed training"
 requires-python = ">=3.10"
 
