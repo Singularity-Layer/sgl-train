@@ -3,7 +3,11 @@
 # Inference machines use ghcr.io/ggml-org/llama.cpp:server-cuda-* — that image
 # CANNOT fine-tune. This is the training counterpart. Keep LLAMA_CPP_TAG in sync
 # with SGLCompute_Backend/src/lib/ai-machine.ts and the orchestrator's machines.ts.
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-devel
+# The runner installs only prebuilt wheels and prebuilt llama.cpp binaries. It
+# never invokes nvcc, so the 3.8 GB compressed CUDA development toolchain only
+# delayed every cold pod before its first heartbeat. Keep Torch/CUDA/cuDNN
+# identical while pinning the smaller runtime image by digest.
+FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime@sha256:c8268a92a69bd500f8be0e665b2630ee006dadaf7bfbc24249141b15ff622755
 
 ARG LLAMA_CPP_TAG=b9867
 ENV DEBIAN_FRONTEND=noninteractive \
