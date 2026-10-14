@@ -3,11 +3,11 @@
 # Inference machines use ghcr.io/ggml-org/llama.cpp:server-cuda-* — that image
 # CANNOT fine-tune. This is the training counterpart. Keep LLAMA_CPP_TAG in sync
 # with SGLCompute_Backend/src/lib/ai-machine.ts and the orchestrator's machines.ts.
-# The runner installs only prebuilt wheels and prebuilt llama.cpp binaries. It
-# never invokes nvcc, so the 3.8 GB compressed CUDA development toolchain only
-# delayed every cold pod before its first heartbeat. Keep Torch/CUDA/cuDNN
-# identical while pinning the smaller runtime image by digest.
-FROM pytorch/pytorch:2.5.1-cuda12.4-cudnn9-runtime@sha256:c8268a92a69bd500f8be0e665b2630ee006dadaf7bfbc24249141b15ff622755
+# Use RunPod's own pinned PyTorch 2.5.1 / CUDA 12.4.1 image. RunPod hosts commonly
+# carry these official template layers already, so a cold pod downloads only
+# our private runner/dependency layers instead of a monolithic 3.15 GB PyTorch
+# layer from GHCR. The devel toolchain also preserves Triton/Unsloth JIT support.
+FROM runpod/pytorch:0.7.0-cu1241-torch251-ubuntu2204@sha256:3bdc5341e5261bb4fbe009498eb437717ab53e92bdbd13e957c5927bb8fca910
 
 ARG LLAMA_CPP_TAG=b9867
 ENV DEBIAN_FRONTEND=noninteractive \
@@ -105,6 +105,12 @@ RUN python -c "import importlib.util as u; \
     assert u.find_spec('unsloth_zoo'), 'unsloth_zoo not installed'; \
     import xformers, bitsandbytes, cut_cross_entropy, diffusers, tyro; \
     from transformers import GenerationConfig, CompileConfig, HybridCache"
+
+# Fail the image build if the official base ever drifts behind its tag.
+RUN python -c "import sys, torch; \
+    assert sys.version_info >= (3, 10); \
+    assert torch.__version__.split('+')[0] == '2.5.1', torch.__version__; \
+    assert str(torch.version.cuda).startswith('12.4'), torch.version.cuda"
 
 # convert_hf_to_gguf.py is pure Python and lives in the llama.cpp tree; llama-quantize
 # is a compiled binary we take from the prebuilt release rather than compiling here.
