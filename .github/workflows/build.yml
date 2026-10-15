@@ -38,3 +38,14 @@ jobs:
             ghcr.io/singularity-layer/sgl-train:${{ github.sha }}
       - name: Print digest to pin in the backend
         run: echo "PIN THIS DIGEST → ${{ steps.push.outputs.digest }}"
+      - uses: docker/build-push-action@v6
+        id: seed
+        with:
+          context: .
+          file: Dockerfile.seed
+          push: true
+          tags: |
+            ghcr.io/singularity-layer/sgl-train:seed-v0.5.0
+            ghcr.io/singularity-layer/sgl-train:seed-${{ github.sha }}
+      - name: Print seeder digest
+        run: echo "SEEDER DIGEST → ${{ steps.seed.outputs.digest }}"
