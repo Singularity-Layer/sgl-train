@@ -42,7 +42,10 @@ def test_canary_result_log_is_bounded_and_never_includes_token_or_buyer_fields(m
     assert reporter.result("failed", {
         "error": "model load failed", "exit_code": 6,
         "gguf_error": "converter exited 1",
+        "adapter_sha256": "ab" * 32, "adapter_bytes": 123,
+        "gguf_sha256": "cd" * 32, "gguf_bytes": 456,
         "dataset": "buyer-private", "token": "must-not-log",
+        "artifact_url": "https://private.invalid/presigned?secret=yes",
     }) is True
     logged = capsys.readouterr().err
     assert "model load failed" in logged
@@ -50,6 +53,10 @@ def test_canary_result_log_is_bounded_and_never_includes_token_or_buyer_fields(m
     assert "buyer-private" not in logged
     assert "must-not-log" not in logged
     assert "secret-token" not in logged
+    assert "ab" * 32 in logged and '"adapter_bytes": 123' in logged
+    assert "cd" * 32 in logged and '"gguf_bytes": 456' in logged
+    assert "private.invalid" not in logged
+    assert len(logged.encode()) <= 2100
 
 
 def test_result_retries_on_5xx_then_succeeds():

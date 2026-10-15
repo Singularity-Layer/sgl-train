@@ -1,6 +1,6 @@
 from runner.errors import InfraError
 from runner.main import (execute, Deps, EXIT_OK, EXIT_SPEC, EXIT_DATA, EXIT_TRAIN,
-                          EXIT_UPLOAD, EXIT_INFRA)
+                          EXIT_UPLOAD, EXIT_INFRA, _sha256_file)
 
 BASE = {
     "run_id": "r1", "kind": "finetune",
@@ -65,6 +65,38 @@ def test_happy_path_reports_completed_with_both_scores():
     assert payload["trained_revision"] == "sha"
 
 
+def test_completed_result_identifies_exact_uploaded_adapter_and_gguf_files():
+    rep = SpyReporter()
+    uploaded = []
+    hashed = []
+
+    def upload(url, path):
+        uploaded.append(path)
+        return True
+
+    def sha256(path):
+        hashed.append(path)
+        return (("aa" if path.endswith("adapter.tar.gz") else "bb") * 32,
+                17 if path.endswith("adapter.tar.gz") else 29)
+
+    assert execute(BASE, make_deps(rep, upload=upload, sha256=sha256)) == EXIT_OK
+    payload = rep.results[-1][1]
+    assert payload["adapter_sha256"] == "aa" * 32
+    assert payload["adapter_bytes"] == 17
+    assert payload["gguf_sha256"] == "bb" * 32
+    assert payload["gguf_bytes"] == 29
+    assert set(hashed) == set(uploaded[:2])
+
+
+def test_sha256_file_reports_deterministic_digest_and_exact_byte_count(tmp_path):
+    artifact = tmp_path / "artifact.bin"
+    artifact.write_bytes(b"abc" * 400_000)
+    first = _sha256_file(str(artifact))
+    second = _sha256_file(str(artifact))
+    assert first == second
+    assert first == ("0c11736b7105f647967c987272a6ae3605c93933c814bacb55d67dd2cc3cb2f3", 1_200_000)
+
+
 def test_bad_spec_exits_without_touching_the_gpu():
     rep = SpyReporter()
     called = {"train": False}
@@ -108,6 +140,57 @@ def test_convert_failure_still_completes_the_run():
     assert "quantize failed" in payload["gguf_error"]
 
 
+def test_failed_gguf_keeps_adapter_metadata_and_never_claims_gguf_metadata():
+    rep = SpyReporter()
+
+    def convert_fails(*_):
+        raise RuntimeError("quantize failed")
+
+    def sha256(path):
+        assert path.endswith("adapter.tar.gz")
+        return "ab" * 32, 123
+
+    assert execute(BASE, make_deps(rep, convert=convert_fails, sha256=sha256)) == EXIT_OK
+    payload = rep.results[-1][1]
+    assert payload["adapter_sha256"] == "ab" * 32
+    assert payload["adapter_bytes"] == 123
+    assert payload["gguf_ok"] is False
+    assert "gguf_sha256" not in payload
+    assert "gguf_bytes" not in payload
+
+
+def test_missing_gguf_metadata_does_not_remove_adapter_metadata():
+    rep = SpyReporter()
+
+    def sha256(path):
+        if path.endswith("model.gguf"):
+            return None
+        return "cd" * 32, 456
+
+    assert execute(BASE, make_deps(rep, sha256=sha256)) == EXIT_OK
+    payload = rep.results[-1][1]
+    assert payload["adapter_sha256"] == "cd" * 32
+    assert payload["adapter_bytes"] == 456
+    assert "gguf_sha256" not in payload
+    assert "gguf_bytes" not in payload
+
+
+def test_gguf_hash_failure_does_not_remove_adapter_metadata():
+    rep = SpyReporter()
+
+    def sha256(path):
+        if path.endswith("model.gguf"):
+            raise OSError("read failed")
+        return "ef" * 32, 789
+
+    assert execute(BASE, make_deps(rep, sha256=sha256)) == EXIT_OK
+    payload = rep.results[-1][1]
+    assert payload["adapter_sha256"] == "ef" * 32
+    assert payload["adapter_bytes"] == 789
+    assert "gguf_sha256" not in payload
+    assert "gguf_bytes" not in payload
+
+
 def test_adapter_upload_failure_fails_the_run():
     rep = SpyReporter()
     assert execute(BASE, make_deps(rep, upload=lambda url, path: False)) == EXIT_UPLOAD
@@ -140,6 +223,8 @@ def test_gguf_upload_failure_completes_but_report_says_gguf_failed():
     assert status == "completed"
     assert payload["gguf_ok"] is False
     assert "upload" in payload["gguf_error"]
+    assert "gguf_sha256" not in payload
+    assert "gguf_bytes" not in payload
     # the persisted report.json must agree with the result callback
     assert written["report"]["gguf_ok"] is False
     assert written["report"]["gguf_error"] == payload["gguf_error"]
