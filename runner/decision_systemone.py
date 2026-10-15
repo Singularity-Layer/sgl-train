@@ -47,6 +47,7 @@ def load_artifact(path: str, device: str = "cuda", dtype=None):
 
 def systemone(model: Any, processor: Any, request: dict, temperature: float = 1.0,
               max_length: int = 16384) -> dict:
+    import torch
     try:  # artifact folder
         from joint_schema_model import collate_records, encode_record, systemone_answer
     except ImportError:  # repository package
@@ -67,8 +68,9 @@ def systemone(model: Any, processor: Any, request: dict, temperature: float = 1.
     encoded = encode_record(
         processor.tokenizer, request, max_length=max_length, processor=processor)
     device = next(model.parameters()).device
-    logits = model(collate_records(
-        [encoded], processor.tokenizer.pad_token_id, device))[0]
+    with torch.inference_mode():
+        logits = model(collate_records(
+            [encoded], processor.tokenizer.pad_token_id, device))[0]
     answers = {}
     for question, values in zip(encoded.questions, logits):
         probabilities = (values.float() / float(temperature)).softmax(-1).tolist()

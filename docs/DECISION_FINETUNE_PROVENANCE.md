@@ -23,8 +23,10 @@ and unchanged.
 ## Training and evaluation contract
 
 - Input rows are strict `state`, `questions`, and `gold` records.
-- A seeded row-level split creates training, calibration holdout, and untouched
-  test sets.
+- A seeded connected-component split creates training, calibration holdout,
+  and untouched test sets. `group_key`/`group_id` keeps provider or service
+  families together; canonical state+question hashes join duplicates even when
+  labels or supplied family keys differ. Exact duplicates are removed.
 - The backbone receives PEFT LoRA adapters and the Clef joint head trains with
   option cross-entropy plus a Brier calibration term.
 - Scalar temperature calibration fits only the holdout set.
@@ -32,6 +34,9 @@ and unchanged.
   reported on the untouched test set.
 - The artifact contains a System One-compatible Clef head and the fitted
   temperature in `sgl_decision_config.json`.
+- Every saved adapter and optional merged bundle is manifest-checked, released
+  from the training process, clean-loaded, and required to answer a bounded
+  System One probe before its presigned upload can begin.
 
 ## Runtime gate
 

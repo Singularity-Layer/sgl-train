@@ -6,6 +6,7 @@ record encoder/head. It does not import Unsloth decision code.
 """
 from __future__ import annotations
 
+import gc
 import json
 import math
 import os
@@ -26,6 +27,70 @@ _COMMON_FILES = _HEAD_FILES + (
     "LICENSE.cloudflare-clef",
     "NOTICE.cloudflare-clef",
 )
+
+
+def validate_artifact_manifest(directory: str | Path, merged: bool) -> dict[str, int]:
+    """Validate the exact reloadable files before an archive can be delivered."""
+    root = Path(directory)
+    required = set(_COMMON_FILES) | {"tokenizer_config.json"}
+    required.add("config.json" if merged else "adapter_config.json")
+    missing = sorted(name for name in required if not (root / name).is_file())
+    if not any((root / name).is_file() for name in ("tokenizer.json", "tokenizer.model")):
+        missing.append("tokenizer.json|tokenizer.model")
+    if not any((root / name).is_file()
+               for name in ("processor_config.json", "preprocessor_config.json")):
+        missing.append("processor_config.json|preprocessor_config.json")
+    weights = list(root.glob("model*.safetensors")) if merged else [
+        root / name for name in _ADAPTER_WEIGHTS if (root / name).is_file()
+    ]
+    if not weights:
+        missing.append("model*.safetensors" if merged else "adapter_model.safetensors")
+    if missing:
+        raise InfraError(
+            "[engine=clef-peft] decision artifact manifest is incomplete: "
+            + ", ".join(missing))
+    for name in ("joint_head_config.json", "sgl_decision_config.json",
+                 "config.json" if merged else "adapter_config.json"):
+        try:
+            json.loads((root / name).read_text(encoding="utf-8"))
+        except (OSError, ValueError) as exc:
+            raise InfraError(
+                f"[engine=clef-peft] decision artifact has invalid {name}") from exc
+    return {path.name: path.stat().st_size for path in sorted(root.iterdir()) if path.is_file()}
+
+
+def verify_systemone_artifact(directory: str | Path, merged: bool, loader=None, decide=None) -> None:
+    """Clean-load a staged artifact and make one bounded System One decision."""
+    validate_artifact_manifest(directory, merged)
+    if loader is None or decide is None:
+        from .decision_systemone import load_artifact, systemone
+        loader = loader or load_artifact
+        decide = decide or systemone
+    model = processor = None
+    try:
+        model, processor, temperature = loader(str(directory))
+        response = decide(model, processor, {
+            "model": "sgl-artifact-verification",
+            "state": "Verify that this saved decision model can answer.",
+            "questions": {
+                "ready": {
+                    "type": "noul",
+                    "instructions": "Can the artifact produce a typed decision?",
+                }
+            },
+        }, temperature=temperature)
+        answer = ((response or {}).get("answers") or {}).get("ready")
+        if not isinstance(answer, dict) or answer.get("type") != "noul":
+            raise RuntimeError("saved artifact returned an invalid System One response")
+    finally:
+        del model, processor
+        gc.collect()
+        try:
+            import torch
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except ImportError:
+            pass
 
 
 @dataclass(frozen=True)
@@ -135,6 +200,19 @@ class TorchDecisionBackend:
     def cuda_available(self) -> bool:
         return bool(self.torch.cuda.is_available())
 
+    def seed(self, seed: int) -> None:
+        random.seed(seed)
+        try:
+            import numpy
+            numpy.random.seed(seed)
+        except ImportError:
+            pass
+        from transformers import set_seed
+        set_seed(seed)
+        self.torch.manual_seed(seed)
+        if self.torch.cuda.is_available():
+            self.torch.cuda.manual_seed_all(seed)
+
     def _target_modules(self, backbone) -> list[str]:
         """Select language-backbone linear layers without touching vision or lm_head."""
         text_model = backbone.model
@@ -212,7 +290,6 @@ class TorchDecisionBackend:
             "feedforward": width * 4,
             "dropout": 0.0,
         }
-        torch.manual_seed(spec.recipe.seed)
         head = self.clef.JointSchemaHead(**head_config).to(device=device, dtype=torch.float32)
         model = self.clef.ClefModel(backbone, head)
         return DecisionSession(model, processor, tokenizer, device, dtype, head_config)
@@ -369,6 +446,16 @@ class TorchDecisionBackend:
     def describe(session: DecisionSession) -> tuple[str, str]:
         return str(session.device), str(session.dtype)
 
+    def release(self, session: DecisionSession) -> None:
+        session.model = None
+        gc.collect()
+        if self.torch.cuda.is_available():
+            self.torch.cuda.empty_cache()
+
+    @staticmethod
+    def verify_artifact(directory: str, merged: bool) -> None:
+        verify_systemone_artifact(directory, merged)
+
 
 def _replace_dir(stage: Path, final: Path) -> None:
     if final.exists():
@@ -376,20 +463,17 @@ def _replace_dir(stage: Path, final: Path) -> None:
     stage.replace(final)
 
 
-def _stage_save(final_text: str, save, verify) -> None:
+def _stage_save(final_text: str, save, merged: bool) -> None:
     final = Path(final_text)
     stage = final.with_name(final.name + ".staging")
     shutil.rmtree(stage, ignore_errors=True)
     stage.parent.mkdir(parents=True, exist_ok=True)
     try:
         save(str(stage))
-        complete = all((stage / name).is_file() for name in _COMMON_FILES) and verify(stage)
+        validate_artifact_manifest(stage, merged)
     except Exception:
         shutil.rmtree(stage, ignore_errors=True)
         raise
-    if not complete:
-        shutil.rmtree(stage, ignore_errors=True)
-        raise InfraError("[engine=clef-peft] decision artifact save was incomplete")
     _replace_dir(stage, final)
 
 
@@ -407,6 +491,7 @@ def run_decision_finetune(
         raise InfraError("[engine=clef-peft] CUDA is unavailable on this box")
     repo, revision = _trained_pin(spec)
     r = spec.recipe
+    backend.seed(r.seed)
     on_progress("loading_model", 0.06)
     try:
         session = backend.load(spec)
@@ -436,7 +521,7 @@ def run_decision_finetune(
     _stage_save(
         out_dirs["adapter_dir"],
         lambda directory: backend.save_adapter(session, directory, temperature, spec),
-        lambda directory: any((directory / name).is_file() for name in _ADAPTER_WEIGHTS),
+        merged=False,
     )
 
     merged_ok, merged_error = False, None
@@ -445,13 +530,29 @@ def run_decision_finetune(
             _stage_save(
                 out_dirs["merged_dir"],
                 lambda directory: backend.save_merged(session, directory, temperature, spec),
-                lambda directory: any(directory.glob("model*.safetensors")),
+                merged=True,
             )
             merged_ok = True
         except Exception as exc:  # noqa: BLE001 - adapter remains the paid deliverable
             merged_error = str(exc)[:300]
 
     device, dtype = backend.describe(session)
+    backend.release(session)
+    try:
+        backend.verify_artifact(out_dirs["adapter_dir"], merged=False)
+    except Exception as exc:
+        shutil.rmtree(out_dirs["adapter_dir"], ignore_errors=True)
+        shutil.rmtree(out_dirs["merged_dir"], ignore_errors=True)
+        if isinstance(exc, InfraError):
+            raise
+        raise InfraError("[engine=clef-peft] saved adapter/head failed reload verification") from exc
+    if merged_ok:
+        try:
+            backend.verify_artifact(out_dirs["merged_dir"], merged=True)
+        except Exception as exc:  # noqa: BLE001 - verified adapter remains deliverable
+            shutil.rmtree(out_dirs["merged_dir"], ignore_errors=True)
+            merged_ok = False
+            merged_error = f"merged reload verification failed: {type(exc).__name__}"
     return {
         "seed": r.seed,
         "steps": steps,
