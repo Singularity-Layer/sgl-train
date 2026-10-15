@@ -209,16 +209,19 @@ def _artifact_hashes(deps: Deps, dirs: dict, gguf_ok: bool) -> dict:
     out: dict = {}
     if deps.sha256 is None:
         return out
-    try:
-        h = deps.sha256(dirs["adapter_tar"])
-        if h:
-            out["adapter_sha256"], out["adapter_bytes"] = h
-        if gguf_ok:
-            h = deps.sha256(dirs["gguf"])
-            if h:
-                out["gguf_sha256"], out["gguf_bytes"] = h
-    except Exception as e:  # noqa: BLE001 — informational only
-        print(f"[sgl] artifact hashing failed: {e}", file=sys.stderr)
+    artifacts = [("adapter", dirs["adapter_tar"])]
+    if gguf_ok:
+        artifacts.append(("gguf", dirs["gguf"]))
+    for name, path in artifacts:
+        try:
+            metadata = deps.sha256(path)
+        except Exception as e:  # noqa: BLE001 — informational only
+            # Hash artifacts independently. A missing/corrupt optional GGUF
+            # must not erase the adapter proof (and vice versa).
+            print(f"[sgl] {name} hashing failed: {e}", file=sys.stderr)
+            continue
+        if metadata:
+            out[f"{name}_sha256"], out[f"{name}_bytes"] = metadata
     return out
 
 

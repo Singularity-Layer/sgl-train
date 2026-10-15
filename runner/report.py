@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import re
 import sys
 import time
 import urllib.error
@@ -17,6 +18,16 @@ import urllib.request
 PROGRESS_ATTEMPTS = 3
 RESULT_ATTEMPTS = 6
 MAX_DELAY = 60.0
+
+_CANARY_TEXT_FIELDS = {"error", "engine_fallback_reason", "gguf_error"}
+_URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.IGNORECASE)
+_QUERY_RE = re.compile(r"\?[^\s<>\"']*=[^\s<>\"']*")
+
+
+def _redact_canary_text(value: str) -> str:
+    """Remove locations that may carry presigned credentials from diagnostics."""
+    value = _URL_RE.sub("[redacted-url]", value)
+    return _QUERY_RE.sub("?[redacted-query]", value)
 
 
 def backoff_delays(attempts: int, base: float = 1.0) -> list[float]:
@@ -82,8 +93,15 @@ class Reporter:
             allow = {
                 "run_id", "status", "error", "exit_code", "engine",
                 "engine_fallback_reason", "trained_repo", "steps", "gguf_ok",
-                "gguf_error",
+                "gguf_error", "adapter_sha256", "adapter_bytes",
+                "gguf_sha256", "gguf_bytes",
             }
-            safe = {key: value for key, value in body.items() if key in allow}
+            safe = {}
+            for key, value in body.items():
+                if key not in allow:
+                    continue
+                if key in _CANARY_TEXT_FIELDS and value is not None:
+                    value = _redact_canary_text(str(value))
+                safe[key] = value
             print(f"[sgl-canary-result] {json.dumps(safe, default=str)[:2000]}", file=sys.stderr, flush=True)
         return self._send(self.result_url, body, RESULT_ATTEMPTS)

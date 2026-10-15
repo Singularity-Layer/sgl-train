@@ -42,7 +42,10 @@ def test_canary_result_log_is_bounded_and_never_includes_token_or_buyer_fields(m
     assert reporter.result("failed", {
         "error": "model load failed", "exit_code": 6,
         "gguf_error": "converter exited 1",
+        "adapter_sha256": "ab" * 32, "adapter_bytes": 123,
+        "gguf_sha256": "cd" * 32, "gguf_bytes": 456,
         "dataset": "buyer-private", "token": "must-not-log",
+        "artifact_url": "https://private.invalid/presigned?secret=yes",
     }) is True
     logged = capsys.readouterr().err
     assert "model load failed" in logged
@@ -50,6 +53,30 @@ def test_canary_result_log_is_bounded_and_never_includes_token_or_buyer_fields(m
     assert "buyer-private" not in logged
     assert "must-not-log" not in logged
     assert "secret-token" not in logged
+    assert "ab" * 32 in logged and '"adapter_bytes": 123' in logged
+    assert "cd" * 32 in logged and '"gguf_bytes": 456' in logged
+    assert "private.invalid" not in logged
+    assert len(logged.encode()) <= 2100
+
+
+def test_canary_result_redacts_urls_and_query_secrets_inside_allowed_text(monkeypatch, capsys):
+    monkeypatch.setenv("SGL_CANARY_LOG_RESULT", "1")
+    reporter = Reporter("https://progress", "https://result", "secret-token", "run-1",
+                        post=lambda *_: 200, sleep=lambda _: None)
+    assert reporter.result("failed", {
+        "error": "PUT https://r2.invalid/file?X-Amz-Signature=secret-one failed",
+        "engine_fallback_reason": "download s3://private-bucket/key?token=secret-two",
+        "gguf_error": "upload failed ?credential=secret-three&expires=9",
+    }) is True
+    logged = capsys.readouterr().err
+    assert "PUT [redacted-url] failed" in logged
+    assert "download [redacted-url]" in logged
+    assert "?[redacted-query]" in logged
+    assert "r2.invalid" not in logged
+    assert "private-bucket" not in logged
+    assert "secret-one" not in logged
+    assert "secret-two" not in logged
+    assert "secret-three" not in logged
 
 
 def test_result_retries_on_5xx_then_succeeds():

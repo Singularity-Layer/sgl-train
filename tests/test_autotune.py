@@ -90,7 +90,9 @@ def make(rep, losses, clock=None, trial_seconds=60, **over):
         upload=lambda url, path: calls["upload"].append((url, path)) or True,
         reporter_factory=lambda s: rep, write_report=lambda p, o: None,
         tar=lambda src, dest: dest, evaluate=evaluate, clock=clock,
-        rmtree=lambda p: calls["rm"].append(p), sha256=lambda p: ("ab" * 32, 123),
+        rmtree=lambda p: calls["rm"].append(p),
+        sha256=lambda p: (("ab" * 32, 123) if p.endswith("adapter.tar.gz")
+                          else ("cd" * 32, 456)),
     )
     base.update(over)
     return Deps(**base), calls
@@ -133,7 +135,10 @@ def test_picks_lowest_validation_loss_and_reports_test_split():
     # three disjoint splits: train + val + test == all rows
     _, n_train, n_val, _ = calls["train"][0]
     assert n_train + n_val + payload["eval_rows"] == 40
-    assert payload["gguf_sha256"] == "ab" * 32
+    assert payload["adapter_sha256"] == "ab" * 32
+    assert payload["adapter_bytes"] == 123
+    assert payload["gguf_sha256"] == "cd" * 32
+    assert payload["gguf_bytes"] == 456
     # the losing trials' dirs are cleaned up, the winner is kept
     assert any(p.endswith("r1-t1") for p in calls["rm"])
     assert any(p.endswith("r1-t3") for p in calls["rm"])
