@@ -10,6 +10,10 @@ small CPU container built from `Dockerfile.seed` installs the pinned GPU runtime
 onto a Runpod network volume with `scripts/seed-volume-runtime.sh`. Paid Pods
 then mount that volume at `/workspace` and start through `runner.bootstrap`.
 
+Both images carry the checksum-pinned conda-forge GCC 13 C++ runtime required
+by bitsandbytes. Debian bookworm's system GCC 12 runtime lacks
+`GLIBCXX_3.4.32`, so QLoRA must resolve `/opt/sgl/conda/lib` first.
+
 The bootstrap refuses to import the training stack unless
 `/workspace/sgl-train/runtime/v0.5.0/READY.json` exactly matches its runtime
 schema and version. Job datasets and generated artifacts remain on ephemeral
