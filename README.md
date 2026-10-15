@@ -5,10 +5,10 @@ quantized GGUF + eval report).
 
 ## Volume-backed Pod startup
 
-The production image is intentionally a small private bootstrap. Heavy GPU
-dependencies are copied once from the full `v0.4.0` runtime into a Runpod
-network volume with `scripts/seed-volume-runtime.sh`. Paid Pods then mount that
-volume at `/workspace` and start through `runner.bootstrap`.
+The production image is intentionally a small private bootstrap. A one-shot,
+small CPU container built from `Dockerfile.seed` installs the pinned GPU runtime
+onto a Runpod network volume with `scripts/seed-volume-runtime.sh`. Paid Pods
+then mount that volume at `/workspace` and start through `runner.bootstrap`.
 
 The bootstrap refuses to import the training stack unless
 `/workspace/sgl-train/runtime/v0.5.0/READY.json` exactly matches its runtime
