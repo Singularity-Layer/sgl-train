@@ -8,6 +8,10 @@ class InfraError(RuntimeError):
     """Our-side infrastructure failure — refundable; never the customer's fault."""
 
 
+class DataError(ValueError):
+    """Buyer-owned input cannot be trained; content must never enter the message."""
+
+
 def attach_context(exc: Exception, **ctx: object) -> Exception:
     """Attach execution context (engine, trained_repo, etc.) to an exception.
 

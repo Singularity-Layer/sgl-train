@@ -1,0 +1,14 @@
+Cloudflare Clef joint-schema runtime
+
+Copyright 2026 Cloudflare, Inc.
+Licensed under the Apache License, Version 2.0.
+
+Vendored file: joint_schema_model.py
+Upstream: https://huggingface.co/Cloudflare/clef/blob/main/joint_schema_model.py
+Pinned upstream revision: 0b331204bb13fbd2ca93a64df1956f5b55478ce5
+Retrieved: 2026-10-15
+Vendored source SHA-256: 0e304cf7c6500e8bb59bef7e2afd2c6373f82596dfb3b57d1aa93c175e2dc3a3
+License SHA-256: bbedc3fda3305820b977265f01b8619d87570a6739de3a5582c3464840f1e57a
+
+The Singularity training loop, targets, loss, calibration, evaluation, and
+artifact staging are independent code and are not copied from Unsloth.

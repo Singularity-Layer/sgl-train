@@ -21,7 +21,7 @@ from typing import Callable
 
 from .artifacts import paths, put_file, tar_dir
 from .dataset import load_jsonl, split
-from .errors import InfraError
+from .errors import DataError, InfraError
 from .evalmath import improved
 from .report import Reporter
 from .spec import SpecError, parse_spec
@@ -52,6 +52,7 @@ class Deps:
     rmtree: Callable = lambda p: shutil.rmtree(p, ignore_errors=True)
     sha256: Callable | None = None        # (path) -> (hex, bytes) | None
     prepare_resume: Callable | None = None  # (resume_spec, archive_path, target_dir) -> path
+    decision_train: Callable | None = None
 
 
 def execute(raw_spec: dict, deps: Deps) -> int:
@@ -92,7 +93,7 @@ def execute(raw_spec: dict, deps: Deps) -> int:
                                   "exit_code": EXIT_INFRA})
             return EXIT_INFRA
 
-    if spec.kind != "finetune":
+    if spec.kind not in {"finetune", "decision_finetune"}:
         rep.result("failed", {"error": f"kind '{spec.kind}' is not supported by this image"})
         return EXIT_SPEC
 
@@ -114,6 +115,9 @@ def execute(raw_spec: dict, deps: Deps) -> int:
     if fetch_error is not None:
         rep.result("failed", {"error": f"dataset fetch failed: {fetch_error}"})
         return EXIT_INFRA
+
+    if spec.kind == "decision_finetune":
+        return _execute_decision(spec, raw_dataset, deps, rep, dirs)
 
     try:
         # Decoding happens INSIDE this try, not in _http_get: a non-UTF-8 buyer
@@ -285,6 +289,111 @@ def _sha256_file(path: str) -> tuple[str, int] | None:
             h.update(chunk)
             n += len(chunk)
     return h.hexdigest(), n
+
+
+def _execute_decision(spec, raw_dataset, deps: Deps, rep, dirs: dict) -> int:
+    """Run the dark Clef/LoRA lane without entering the plain-LM GGUF path."""
+    from .decision_dataset import load_decision_jsonl, split_three
+
+    try:
+        text = raw_dataset.decode("utf-8") if isinstance(raw_dataset, (bytes, bytearray)) else raw_dataset
+        rows, stats = load_decision_jsonl(text)
+        train_rows, holdout_rows, test_rows = split_three(
+            rows, spec.recipe.eval_split, spec.recipe.seed)
+    except Exception as exc:  # buyer-owned data fault; never echo row content
+        rep.result("failed", {"error": f"decision dataset error: {exc}"})
+        return EXIT_DATA
+
+    if deps.decision_train is None:
+        rep.result("failed", {"error": "decision training runtime is unavailable"})
+        return EXIT_INFRA
+    try:
+        outcome = deps.decision_train(
+            spec, train_rows, holdout_rows, test_rows, dirs, rep.progress)
+    except DataError as exc:
+        rep.result("failed", {"error": str(exc)})
+        return EXIT_DATA
+    except InfraError as exc:
+        rep.result("failed", {"error": str(exc)})
+        return EXIT_INFRA
+    except Exception as exc:  # noqa: BLE001
+        rep.result("failed", {"error": f"decision training failed: {exc}"})
+        return EXIT_TRAIN
+
+    report = {
+        "run_id": spec.run_id,
+        "kind": "decision_finetune",
+        "artifact_format": "clef-peft-adapter-head",
+        "base_model": spec.hf_repo,
+        "base_revision": spec.hf_revision,
+        "trained_repo": outcome.get("trained_repo"),
+        "trained_revision": outcome.get("trained_revision"),
+        "seed": outcome["seed"],
+        "steps": outcome["steps"],
+        "engine": outcome.get("engine"),
+        "device": outcome.get("device"),
+        "dtype": outcome.get("dtype"),
+        "selection_split": "holdout",
+        "eval_split_name": "test",
+        "baseline": outcome["baseline"],
+        "baseline_holdout": outcome["baseline_holdout"],
+        "final": outcome["final"],
+        "calibration": outcome["calibration"],
+        "calibration_temperature": outcome.get("calibration_temperature"),
+        "decision_recipe": outcome.get("decision_recipe"),
+        "improved": outcome["final"]["accuracy"] > outcome["baseline"]["accuracy"],
+        "dataset_stats": stats.__dict__,
+        "train_rows": len(train_rows),
+        "holdout_rows": len(holdout_rows),
+        "test_rows": len(test_rows),
+        "merged_ok": bool(outcome.get("merged_ok")),
+        "merged_error": outcome.get("merged_error"),
+    }
+
+    # The adapter archive contains both PEFT weights and the Clef head. It is
+    # the required deliverable. A merged 16-bit safetensors bundle is optional.
+    try:
+        rep.progress("uploading", 0.97)
+        deps.tar(dirs["adapter_dir"], dirs["adapter_tar"])
+        if not deps.upload(spec.artifact_urls["adapter"], dirs["adapter_tar"]):
+            rep.result("failed", {"error": "decision adapter/head upload failed", **report})
+            return EXIT_UPLOAD
+    except Exception as exc:  # noqa: BLE001
+        rep.result("failed", {"error": f"decision artifact stage failed: {exc}", **report})
+        return EXIT_UPLOAD
+
+    delivered = [("adapter", dirs["adapter_tar"])]
+    if report["merged_ok"]:
+        try:
+            deps.tar(dirs["merged_dir"], dirs["merged_tar"])
+            ok = deps.upload(spec.artifact_urls["merged"], dirs["merged_tar"])
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            print(f"[sgl] decision merged upload raised: {exc}", file=sys.stderr)
+        if ok:
+            delivered.append(("merged", dirs["merged_tar"]))
+        else:
+            report["merged_ok"] = False
+            report["merged_error"] = "merged bundle upload failed"
+
+    if deps.sha256 is not None:
+        for name, path in delivered:
+            try:
+                metadata = deps.sha256(path)
+            except Exception as exc:  # noqa: BLE001
+                print(f"[sgl] decision {name} hashing failed: {exc}", file=sys.stderr)
+                continue
+            if metadata:
+                report[f"{name}_sha256"], report[f"{name}_bytes"] = metadata
+
+    try:
+        deps.write_report(dirs["report"], report)
+        deps.upload(spec.artifact_urls["report"], dirs["report"])
+    except Exception as exc:  # noqa: BLE001
+        print(f"[sgl] decision report artifact failed (non-fatal): {exc}", file=sys.stderr)
+    if not rep.result("completed", report):
+        print(f"[sgl] WARNING: result callback delivery failed for run {spec.run_id}", file=sys.stderr)
+    return EXIT_OK
 
 
 def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
@@ -520,6 +629,7 @@ def _default_deps() -> Deps:
             on_checkpoint=publish, runtime=runtime,
         )
 
+    from .trainer_decision import run_decision_finetune
     return Deps(
         fetch=_http_get,
         train=train_with_checkpoints,
@@ -531,6 +641,7 @@ def _default_deps() -> Deps:
         evaluate=_lazy_evaluate,
         sha256=_sha256_file,
         prepare_resume=prepare_resume_checkpoint,
+        decision_train=run_decision_finetune,
     )
 
 

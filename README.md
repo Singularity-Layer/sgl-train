@@ -79,6 +79,13 @@ regardless of which one ran:
 - **unsloth** — faster kernels, and the only engine that supports QLoRA
   (`recipe.load_in_4bit`).
 
+The repository also contains a **dark, local-only** `decision_finetune` lane
+for typed Clef decisions. It is not available in the active hosted runtime.
+Read [`docs/DECISION_FINETUNE_PROVENANCE.md`](docs/DECISION_FINETUNE_PROVENANCE.md)
+before building or enabling it. The lane uses a vendored Apache-2.0 Cloudflare
+Clef head plus an independent PyTorch/PEFT training loop and still requires a
+separately canaried dependency stack.
+
 `SGL_ENGINE` selects which one runs (default `auto`):
 
 | `SGL_ENGINE` | behavior |

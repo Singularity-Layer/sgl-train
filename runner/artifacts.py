@@ -25,6 +25,7 @@ def paths(run_id: str) -> dict[str, str]:
         "adapter_dir": os.path.join(root, "adapter"),
         "merged_dir": os.path.join(root, "merged"),
         "adapter_tar": os.path.join(root, "adapter.tar.gz"),
+        "merged_tar": os.path.join(root, "merged.tar.gz"),
         "gguf": os.path.join(root, "model.gguf"),
         "report": os.path.join(root, "report.json"),
         "checkpoint_a_dir": os.path.join(root, "checkpoint-a"),
