@@ -1,3 +1,7 @@
+import hashlib
+
+import pytest
+
 from runner.errors import InfraError
 from runner.main import (execute, Deps, EXIT_OK, EXIT_SPEC, EXIT_DATA, EXIT_TRAIN,
                           EXIT_UPLOAD, EXIT_INFRA, _sha256_file)
@@ -65,27 +69,60 @@ def test_happy_path_reports_completed_with_both_scores():
     assert payload["trained_revision"] == "sha"
 
 
-def test_completed_result_identifies_exact_uploaded_adapter_and_gguf_files():
+def test_completed_result_hashes_exact_uploaded_bytes_after_upload(monkeypatch, tmp_path):
     rep = SpyReporter()
-    uploaded = []
-    hashed = []
+    root = tmp_path / "r1"
+    dirs = {
+        "root": str(root),
+        "adapter_dir": str(root / "adapter"),
+        "merged_dir": str(root / "merged"),
+        "adapter_tar": str(root / "adapter.tar.gz"),
+        "gguf": str(root / "model.gguf"),
+        "report": str(root / "report.json"),
+    }
+    root.mkdir()
+    adapter_bytes = b"exact adapter bytes"
+    gguf_bytes = b"exact gguf bytes"
+    events = []
+    uploaded = {}
+
+    monkeypatch.setattr("runner.main.paths", lambda _: dirs)
+
+    def tar(_src, dest):
+        with open(dest, "wb") as artifact:
+            artifact.write(adapter_bytes)
+        return dest
+
+    def convert(_merged, dest, _quantize):
+        with open(dest, "wb") as artifact:
+            artifact.write(gguf_bytes)
 
     def upload(url, path):
-        uploaded.append(path)
+        names = {
+            BASE["artifact_urls"]["adapter"]: "adapter",
+            BASE["artifact_urls"]["gguf"]: "gguf",
+        }
+        name = names.get(url)
+        if name is not None:
+            events.append(f"upload:{name}")
+            with open(path, "rb") as artifact:
+                uploaded[name] = artifact.read()
         return True
 
     def sha256(path):
-        hashed.append(path)
-        return (("aa" if path.endswith("adapter.tar.gz") else "bb") * 32,
-                17 if path.endswith("adapter.tar.gz") else 29)
+        name = "adapter" if path == dirs["adapter_tar"] else "gguf"
+        events.append(f"hash:{name}")
+        return _sha256_file(path)
 
-    assert execute(BASE, make_deps(rep, upload=upload, sha256=sha256)) == EXIT_OK
+    deps = make_deps(rep, upload=upload, sha256=sha256, tar=tar, convert=convert)
+    assert execute(BASE, deps) == EXIT_OK
     payload = rep.results[-1][1]
-    assert payload["adapter_sha256"] == "aa" * 32
-    assert payload["adapter_bytes"] == 17
-    assert payload["gguf_sha256"] == "bb" * 32
-    assert payload["gguf_bytes"] == 29
-    assert set(hashed) == set(uploaded[:2])
+    assert uploaded == {"adapter": adapter_bytes, "gguf": gguf_bytes}
+    assert events == ["upload:adapter", "upload:gguf", "hash:adapter", "hash:gguf"]
+    assert payload["adapter_sha256"] == hashlib.sha256(adapter_bytes).hexdigest()
+    assert payload["adapter_bytes"] == len(adapter_bytes)
+    assert payload["gguf_sha256"] == hashlib.sha256(gguf_bytes).hexdigest()
+    assert payload["gguf_bytes"] == len(gguf_bytes)
 
 
 def test_sha256_file_reports_deterministic_digest_and_exact_byte_count(tmp_path):
@@ -189,6 +226,25 @@ def test_gguf_hash_failure_does_not_remove_adapter_metadata():
     assert payload["adapter_bytes"] == 789
     assert "gguf_sha256" not in payload
     assert "gguf_bytes" not in payload
+
+
+@pytest.mark.parametrize("adapter_result", [None, OSError("read failed")], ids=["missing", "failed"])
+def test_adapter_metadata_failure_does_not_remove_gguf_metadata(adapter_result):
+    rep = SpyReporter()
+
+    def sha256(path):
+        if path.endswith("adapter.tar.gz"):
+            if isinstance(adapter_result, Exception):
+                raise adapter_result
+            return adapter_result
+        return "12" * 32, 987
+
+    assert execute(BASE, make_deps(rep, sha256=sha256)) == EXIT_OK
+    payload = rep.results[-1][1]
+    assert "adapter_sha256" not in payload
+    assert "adapter_bytes" not in payload
+    assert payload["gguf_sha256"] == "12" * 32
+    assert payload["gguf_bytes"] == 987
 
 
 def test_adapter_upload_failure_fails_the_run():

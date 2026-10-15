@@ -23,6 +23,8 @@ bounded allowlist of terminal fields; callback tokens and buyer data are never
 included. Completed result callbacks identify each delivered adapter and GGUF
 with its SHA-256 digest and exact byte count. The canary may print those safe
 integrity fields, but never artifact URLs, dataset content, or credentials.
+URLs and query strings embedded in diagnostic text are redacted before that
+text reaches the canary log.
 
 The bootstrap refuses to import the training stack unless
 `/workspace/sgl-train/runtime/v0.5.0/READY.json` exactly matches its runtime

@@ -59,6 +59,26 @@ def test_canary_result_log_is_bounded_and_never_includes_token_or_buyer_fields(m
     assert len(logged.encode()) <= 2100
 
 
+def test_canary_result_redacts_urls_and_query_secrets_inside_allowed_text(monkeypatch, capsys):
+    monkeypatch.setenv("SGL_CANARY_LOG_RESULT", "1")
+    reporter = Reporter("https://progress", "https://result", "secret-token", "run-1",
+                        post=lambda *_: 200, sleep=lambda _: None)
+    assert reporter.result("failed", {
+        "error": "PUT https://r2.invalid/file?X-Amz-Signature=secret-one failed",
+        "engine_fallback_reason": "download s3://private-bucket/key?token=secret-two",
+        "gguf_error": "upload failed ?credential=secret-three&expires=9",
+    }) is True
+    logged = capsys.readouterr().err
+    assert "PUT [redacted-url] failed" in logged
+    assert "download [redacted-url]" in logged
+    assert "?[redacted-query]" in logged
+    assert "r2.invalid" not in logged
+    assert "private-bucket" not in logged
+    assert "secret-one" not in logged
+    assert "secret-two" not in logged
+    assert "secret-three" not in logged
+
+
 def test_result_retries_on_5xx_then_succeeds():
     post = FakePost([500, 502, 200])
     r = Reporter("https://p.invalid", "https://r.invalid", "tok", "run-1",
