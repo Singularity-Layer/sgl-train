@@ -7,7 +7,9 @@ but only on 5xx. A 4xx means the backend rejected us and repeating will not help
 from __future__ import annotations
 
 import json
+import os
 import random
+import sys
 import time
 import urllib.error
 import urllib.request
@@ -76,4 +78,11 @@ class Reporter:
 
     def result(self, status: str, payload: dict) -> bool:
         body = {"run_id": self.run_id, "status": status, **payload}
+        if os.environ.get("SGL_CANARY_LOG_RESULT") == "1":
+            allow = {
+                "run_id", "status", "error", "exit_code", "engine",
+                "engine_fallback_reason", "trained_repo", "steps", "gguf_ok",
+            }
+            safe = {key: value for key, value in body.items() if key in allow}
+            print(f"[sgl-canary-result] {json.dumps(safe, default=str)[:2000]}", file=sys.stderr, flush=True)
         return self._send(self.result_url, body, RESULT_ATTEMPTS)
