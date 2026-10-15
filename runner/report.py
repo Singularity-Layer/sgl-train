@@ -82,6 +82,7 @@ class Reporter:
             allow = {
                 "run_id", "status", "error", "exit_code", "engine",
                 "engine_fallback_reason", "trained_repo", "steps", "gguf_ok",
+                "gguf_error",
             }
             safe = {key: value for key, value in body.items() if key in allow}
             print(f"[sgl-canary-result] {json.dumps(safe, default=str)[:2000]}", file=sys.stderr, flush=True)

@@ -41,10 +41,12 @@ def test_canary_result_log_is_bounded_and_never_includes_token_or_buyer_fields(m
                         post=lambda *_: 200, sleep=lambda _: None)
     assert reporter.result("failed", {
         "error": "model load failed", "exit_code": 6,
+        "gguf_error": "converter exited 1",
         "dataset": "buyer-private", "token": "must-not-log",
     }) is True
     logged = capsys.readouterr().err
     assert "model load failed" in logged
+    assert "converter exited 1" in logged
     assert "buyer-private" not in logged
     assert "must-not-log" not in logged
     assert "secret-token" not in logged
