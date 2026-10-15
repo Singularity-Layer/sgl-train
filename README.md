@@ -13,6 +13,8 @@ then mount that volume at `/workspace` and start through `runner.bootstrap`.
 Both images carry the checksum-pinned conda-forge GCC 13 C++ runtime required
 by bitsandbytes. Debian bookworm's system GCC 12 runtime lacks
 `GLIBCXX_3.4.32`, so QLoRA must resolve `/opt/sgl/conda/lib` first.
+The paid bootstrap also includes `gcc/g++`: Unsloth's Triton kernels compile
+on first use, and fail before training when no C compiler is available.
 
 Set `SGL_RUNTIME_PROBE=true` on a temporary GPU Pod to run a customer-free
 canary covering PyTorch CUDA, xFormers, and a real bitsandbytes NF4 operation.
