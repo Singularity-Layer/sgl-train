@@ -35,6 +35,21 @@ def test_result_posts_to_result_url():
     assert body["eval_loss"] == 1.5
 
 
+def test_canary_result_log_is_bounded_and_never_includes_token_or_buyer_fields(monkeypatch, capsys):
+    monkeypatch.setenv("SGL_CANARY_LOG_RESULT", "1")
+    reporter = Reporter("https://progress", "https://result", "secret-token", "run-1",
+                        post=lambda *_: 200, sleep=lambda _: None)
+    assert reporter.result("failed", {
+        "error": "model load failed", "exit_code": 6,
+        "dataset": "buyer-private", "token": "must-not-log",
+    }) is True
+    logged = capsys.readouterr().err
+    assert "model load failed" in logged
+    assert "buyer-private" not in logged
+    assert "must-not-log" not in logged
+    assert "secret-token" not in logged
+
+
 def test_result_retries_on_5xx_then_succeeds():
     post = FakePost([500, 502, 200])
     r = Reporter("https://p.invalid", "https://r.invalid", "tok", "run-1",

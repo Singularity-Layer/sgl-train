@@ -16,6 +16,9 @@ by bitsandbytes. Debian bookworm's system GCC 12 runtime lacks
 
 Set `SGL_RUNTIME_PROBE=true` on a temporary GPU Pod to run a customer-free
 canary covering PyTorch CUDA, xFormers, and a real bitsandbytes NF4 operation.
+For an end-to-end provider canary, `SGL_CANARY_LOG_RESULT=1` prints only a
+bounded allowlist of terminal fields; callback tokens and buyer data are never
+included.
 
 The bootstrap refuses to import the training stack unless
 `/workspace/sgl-train/runtime/v0.5.0/READY.json` exactly matches its runtime
