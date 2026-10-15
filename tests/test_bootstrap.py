@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from runner.bootstrap import RuntimeNotReady, prepare_runtime, run
+from runner.bootstrap import RuntimeNotReady, prepare_runtime, run, runtime_probe
 
 
 def test_prepare_runtime_requires_exact_marker(tmp_path):
@@ -51,3 +51,8 @@ def test_run_fails_closed_before_entrypoint_when_cache_is_absent(monkeypatch):
 
     assert run(entrypoint) == 6
     assert called is False
+
+
+def test_runtime_probe_fails_closed_without_the_gpu_stack(capsys):
+    assert runtime_probe() == 6
+    assert '"probe": "failed"' in capsys.readouterr().err

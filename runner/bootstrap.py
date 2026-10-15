@@ -57,6 +57,9 @@ def run(entrypoint: Callable[[], int] | None = None) -> int:
     if entrypoint is not None:
         return entrypoint()
 
+    if os.environ.get("SGL_RUNTIME_PROBE", "").strip().lower() == "true":
+        return runtime_probe()
+
     # Import after sys.path is wired so torch/transformers resolve exclusively
     # from the immutable volume runtime rather than this tiny image.
     from .main import _default_deps, execute
@@ -70,6 +73,40 @@ def run(entrypoint: Callable[[], int] | None = None) -> int:
         print("[sgl] SGL_JOB_SPEC must be an object", file=sys.stderr)
         return 2
     return execute(raw, _default_deps())
+
+
+def runtime_probe() -> int:
+    """Exercise the actual GPU libraries without customer data or callbacks."""
+    try:
+        import torch
+        import xformers  # noqa: F401
+        import bitsandbytes as bnb
+        from bitsandbytes.cextension import lib as bnb_lib
+
+        if not torch.cuda.is_available():
+            raise RuntimeError("CUDA is unavailable")
+        if not bool(getattr(bnb_lib, "compiled_with_cuda", False)):
+            raise RuntimeError("bitsandbytes CUDA library did not load")
+        layer = bnb.nn.Linear4bit(
+            16, 8, bias=False, compute_dtype=torch.float16,
+            compress_statistics=True, quant_type="nf4",
+        ).cuda()
+        sample = torch.randn(2, 16, device="cuda", dtype=torch.float16)
+        output = layer(sample)
+        torch.cuda.synchronize()
+        if tuple(output.shape) != (2, 8):
+            raise RuntimeError(f"unexpected probe output shape: {tuple(output.shape)}")
+        print(json.dumps({
+            "probe": "ok",
+            "gpu": torch.cuda.get_device_name(0),
+            "torch": torch.__version__,
+            "cuda": torch.version.cuda,
+            "bitsandbytes_cuda": True,
+        }), flush=True)
+        return 0
+    except Exception as exc:  # noqa: BLE001 — probe must emit one bounded failure
+        print(json.dumps({"probe": "failed", "error": str(exc)[:500]}), file=sys.stderr, flush=True)
+        return 6
 
 
 if __name__ == "__main__":
