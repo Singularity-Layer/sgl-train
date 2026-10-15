@@ -28,13 +28,17 @@ ENV DEBIAN_FRONTEND=noninteractive \
     HF_HOME=/workspace/sgl-train/cache/huggingface \
     TORCH_HOME=/workspace/sgl-train/cache/torch \
     UNSLOTH_DISABLE_AUTO_UPDATES=1 \
-    LD_LIBRARY_PATH=/opt/sgl/conda/lib
+    LD_LIBRARY_PATH=/opt/sgl/conda/lib \
+    CC=gcc \
+    CXX=g++
 
 COPY --from=libstdcpp /opt/sgl/conda /opt/sgl/conda
 
 RUN apt-get update -y \
- && apt-get install -y --no-install-recommends ca-certificates libgomp1 \
+ && apt-get install -y --no-install-recommends ca-certificates gcc g++ libgomp1 \
  && ln -sf /usr/local/bin/python3.10 /usr/bin/python3.10 \
+ && gcc --version \
+ && g++ --version \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /opt/sgl/app
