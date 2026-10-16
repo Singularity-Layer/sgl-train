@@ -146,6 +146,39 @@ def test_bad_spec_exits_without_touching_the_gpu():
     assert called["train"] is False
 
 
+def test_resume_checkpoint_is_prepared_before_training():
+    rep = SpyReporter()
+    events = []
+    raw = {**BASE, "resume": {
+        "source_run_id": "source-1", "archive_url": "https://d.invalid/checkpoint",
+        "archive_sha256": "ab" * 32, "archive_bytes": 123, "step": 2, "epoch": 1,
+    }}
+    deps = make_deps(
+        rep,
+        prepare_resume=lambda resume, archive, target: events.append((resume.step, archive, target)),
+        train=lambda *args: events.append("train") or make_deps(SpyReporter()).train(*args),
+    )
+    assert execute(raw, deps) == EXIT_OK
+    assert events[0][0] == 2
+    assert events[1] == "train"
+
+
+def test_resume_integrity_failure_stops_before_training():
+    rep = SpyReporter()
+    trained = []
+    raw = {**BASE, "resume": {
+        "source_run_id": "source-1", "archive_url": "https://d.invalid/checkpoint",
+        "archive_sha256": "ab" * 32, "archive_bytes": 123, "step": 2, "epoch": 1,
+    }}
+    code = execute(raw, make_deps(
+        rep, prepare_resume=lambda *_: (_ for _ in ()).throw(ValueError("hash mismatch")),
+        train=lambda *_: trained.append(True),
+    ))
+    assert code == EXIT_INFRA
+    assert trained == []
+    assert "resume checkpoint failed" in rep.results[-1][1]["error"]
+
+
 def test_empty_dataset_fails_before_training():
     rep = SpyReporter()
     code = execute(BASE, make_deps(rep, fetch=lambda url: "not json\nnot json\n"))
@@ -175,6 +208,31 @@ def test_convert_failure_still_completes_the_run():
     assert status == "completed"
     assert payload["gguf_ok"] is False
     assert "quantize failed" in payload["gguf_error"]
+
+
+def test_early_finalization_delivers_adapter_and_skips_optional_gguf():
+    rep = SpyReporter()
+    converted = []
+
+    def train(*_):
+        return {
+            "baseline": {"eval_loss": 2.0, "perplexity": 7.4, "eval_tokens": 10},
+            "final": {"eval_loss": 1.2, "perplexity": 3.3, "eval_tokens": 10},
+            "steps": 30, "planned_steps": 100, "early_finalized": True,
+            "finalization_reason": "runtime_reserve", "seed": 1,
+            "device": "cuda", "dtype": "torch.bfloat16",
+            "trained_repo": "Q/M", "trained_revision": "sha",
+        }
+
+    assert execute(BASE, make_deps(rep, train=train, convert=lambda *_: converted.append(True))) == EXIT_OK
+    status, payload = rep.results[-1]
+    assert status == "completed"
+    assert payload["partial_completion"] is True
+    assert payload["steps"] == 30
+    assert payload["planned_steps"] == 100
+    assert payload["gguf_ok"] is False
+    assert "prepaid runtime" in payload["gguf_error"]
+    assert converted == []
 
 
 def test_failed_gguf_keeps_adapter_metadata_and_never_claims_gguf_metadata():

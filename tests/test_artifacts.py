@@ -11,6 +11,8 @@ def test_paths_are_scoped_to_the_run():
     assert p["adapter_tar"].endswith("adapter.tar.gz")
     assert p["gguf"].endswith("model.gguf")
     assert p["report"].endswith("report.json")
+    assert p["checkpoint_a_tar"].endswith("checkpoint-a.tar.gz")
+    assert p["checkpoint_manifest"].endswith("checkpoint-manifest.json")
 
 
 def test_paths_rejects_a_path_traversal_run_id():
