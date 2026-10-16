@@ -27,6 +27,13 @@ def paths(run_id: str) -> dict[str, str]:
         "adapter_tar": os.path.join(root, "adapter.tar.gz"),
         "gguf": os.path.join(root, "model.gguf"),
         "report": os.path.join(root, "report.json"),
+        "checkpoint_a_dir": os.path.join(root, "checkpoint-a"),
+        "checkpoint_b_dir": os.path.join(root, "checkpoint-b"),
+        "checkpoint_a_tar": os.path.join(root, "checkpoint-a.tar.gz"),
+        "checkpoint_b_tar": os.path.join(root, "checkpoint-b.tar.gz"),
+        "checkpoint_manifest": os.path.join(root, "checkpoint-manifest.json"),
+        "resume_archive": os.path.join(root, "resume-checkpoint.tar.gz"),
+        "resume_dir": os.path.join(root, "resume-checkpoint"),
     }
 
 

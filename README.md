@@ -51,6 +51,18 @@ docker run --gpus all \
 `spec.json` shape: see `runner/spec.py`. `base_model.revision` is required — an
 unpinned model cannot be reproduced, and an unreproducible run cannot be verified.
 
+## Reliable time blocks and resume
+
+Runner v0.6 adds an optional server-authored `runtime` budget. Training enters
+finalization before the paid deadline, evaluates and saves the current adapter,
+and skips optional GGUF conversion when needed to protect delivery.
+
+When `checkpoint_urls` are present, the runner writes alternating private
+adapter/optimizer/RNG checkpoints and publishes the manifest last. A later job
+can receive an integrity-pinned `resume` block, verify and safely extract the
+archive, restore the adapter, optimizer and RNG state, and continue from the
+saved step on a new GPU. No GPU remains alive between runs.
+
 ## Engines
 
 Two training engines share the same load → baseline_eval → wrap-with-LoRA →

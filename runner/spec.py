@@ -66,6 +66,24 @@ class Autotune:
     experiment_url: str
 
 
+@dataclass(frozen=True)
+class RuntimeBudget:
+    budget_seconds: int
+    finalization_reserve_seconds: int
+    estimated_p95_seconds: int
+    profile_version: str
+
+
+@dataclass(frozen=True)
+class ResumeCheckpoint:
+    source_run_id: str
+    archive_url: str
+    archive_sha256: str
+    archive_bytes: int
+    step: int
+    epoch: int
+
+
 MAX_TRIALS = 6
 
 
@@ -87,6 +105,9 @@ class JobSpec:
     artifact_urls: dict[str, str]
     recipe: Recipe
     autotune: Autotune | None = None
+    runtime: RuntimeBudget | None = None
+    checkpoint_urls: dict[str, str] | None = None
+    resume: ResumeCheckpoint | None = None
 
 
 def _req(d: dict, key: str, where: str) -> object:
@@ -282,6 +303,9 @@ def parse_spec(raw: dict) -> JobSpec:
     _check_url("result_url", result_url)
 
     autotune = _parse_autotune(raw.get("autotune"))
+    runtime = _parse_runtime(raw.get("runtime"))
+    checkpoint_urls = _parse_checkpoint_urls(raw.get("checkpoint_urls"))
+    resume = _parse_resume(raw.get("resume"))
 
     return JobSpec(
         run_id=run_id,
@@ -300,6 +324,9 @@ def parse_spec(raw: dict) -> JobSpec:
         artifact_urls=artifact_urls,
         recipe=recipe,
         autotune=autotune,
+        runtime=runtime,
+        checkpoint_urls=checkpoint_urls,
+        resume=resume,
     )
 
 
@@ -342,4 +369,72 @@ def _parse_autotune(raw: object) -> Autotune | None:
         trial_estimate_seconds=_pos_int("trial_estimate_seconds", raw.get("trial_estimate_seconds"), 1, 48 * 3600),
         reserve_seconds=_pos_int("reserve_seconds", raw.get("reserve_seconds"), 0, 48 * 3600),
         experiment_url=experiment_url,
+    )
+
+
+def _runtime_int(where: str, value: object, lo: int, hi: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise SpecError(f"runtime: '{where}' must be an integer") from None
+    if n < lo or n > hi:
+        raise SpecError(f"runtime: '{where}' must be between {lo} and {hi}")
+    return n
+
+
+def _parse_runtime(raw: object) -> RuntimeBudget | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise SpecError("runtime: must be an object")
+    budget = _runtime_int("budget_seconds", raw.get("budget_seconds"), 600, 48 * 3600)
+    reserve = _runtime_int(
+        "finalization_reserve_seconds", raw.get("finalization_reserve_seconds"), 300, 12 * 3600)
+    p95 = _runtime_int("estimated_p95_seconds", raw.get("estimated_p95_seconds"), 1, 7 * 24 * 3600)
+    profile = str(raw.get("profile_version") or '')
+    if not re.fullmatch(r"[A-Za-z0-9._-]{1,64}", profile):
+        raise SpecError("runtime: 'profile_version' must be 1-64 safe characters")
+    if reserve >= budget:
+        raise SpecError("runtime: finalization reserve must be smaller than the budget")
+    return RuntimeBudget(
+        budget_seconds=budget,
+        finalization_reserve_seconds=reserve,
+        estimated_p95_seconds=p95,
+        profile_version=profile,
+    )
+
+
+def _parse_checkpoint_urls(raw: object) -> dict[str, str] | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise SpecError("checkpoint_urls: must be an object")
+    result: dict[str, str] = {}
+    for key in ("a", "b", "manifest"):
+        value = str(_req(raw, key, "checkpoint_urls"))
+        _check_url(f"checkpoint_urls.{key}", value)
+        result[key] = value
+    return result
+
+
+def _parse_resume(raw: object) -> ResumeCheckpoint | None:
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise SpecError("resume: must be an object")
+    source = str(_req(raw, "source_run_id", "resume"))
+    if not _RUN_ID_RE.fullmatch(source):
+        raise SpecError("resume: source_run_id is invalid")
+    archive_url = str(_req(raw, "archive_url", "resume"))
+    _check_url("resume.archive_url", archive_url)
+    digest = str(_req(raw, "archive_sha256", "resume"))
+    if not re.fullmatch(r"[a-f0-9]{64}", digest):
+        raise SpecError("resume: archive_sha256 must be lowercase sha256")
+    return ResumeCheckpoint(
+        source_run_id=source,
+        archive_url=archive_url,
+        archive_sha256=digest,
+        archive_bytes=_runtime_int("resume.archive_bytes", raw.get("archive_bytes"), 1, 20 * 1024**3),
+        step=_runtime_int("resume.step", raw.get("step"), 0, 10_000_000),
+        epoch=_runtime_int("resume.epoch", raw.get("epoch"), 0, 10_000),
     )

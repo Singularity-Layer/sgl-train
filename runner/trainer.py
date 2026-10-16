@@ -10,11 +10,65 @@ no unsloth installed either.
 from __future__ import annotations
 
 import os
+import random
 import shutil
 import sys
 
 from .errors import InfraError, attach_context
 from .evalmath import aggregate
+
+
+def _save_training_checkpoint(model, tokenizer, optimizer, out_dirs, slot, step, epoch, planned_steps):
+    """Write a complete local checkpoint directory before any remote upload."""
+    import torch
+
+    target = out_dirs[f"checkpoint_{slot}_dir"]
+    temp = target + ".tmp"
+    shutil.rmtree(temp, ignore_errors=True)
+    os.makedirs(temp, exist_ok=True)
+    model.save_pretrained(os.path.join(temp, "adapter"))
+    tokenizer.save_pretrained(os.path.join(temp, "adapter"))
+    state = {
+        "version": 1,
+        "step": step,
+        "epoch": epoch,
+        "planned_steps": planned_steps,
+        "optimizer": optimizer.state_dict(),
+        "python_rng": random.getstate(),
+        "torch_rng": torch.get_rng_state(),
+        "cuda_rng": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+    }
+    torch.save(state, os.path.join(temp, "training_state.pt"))
+    shutil.rmtree(target, ignore_errors=True)
+    os.replace(temp, target)
+    return target
+
+
+def _restore_training_checkpoint(model, optimizer, out_dirs, device, planned_steps):
+    """Restore adapter, optimizer, and RNG state from the verified archive."""
+    import torch
+    from peft.utils.save_and_load import load_peft_weights, set_peft_model_state_dict
+
+    root = out_dirs["resume_dir"]
+    state_path = os.path.join(root, "training_state.pt")
+    adapter_dir = os.path.join(root, "adapter")
+    if not os.path.isfile(state_path) or not os.path.isdir(adapter_dir):
+        raise InfraError("resume checkpoint is missing adapter or training state")
+    state = torch.load(state_path, map_location=device, weights_only=False)
+    step = int(state.get("step", -1))
+    epoch = int(state.get("epoch", -1))
+    if step < 0 or step > planned_steps or int(state.get("planned_steps", -1)) != planned_steps:
+        raise InfraError("resume checkpoint does not match this Training Recipe")
+    weights = load_peft_weights(adapter_dir, device=device)
+    result = set_peft_model_state_dict(model, weights, adapter_name="default")
+    if getattr(result, "unexpected_keys", None):
+        raise InfraError("resume adapter contains unexpected weights")
+    optimizer.load_state_dict(state["optimizer"])
+    random.setstate(state["python_rng"])
+    torch.set_rng_state(state["torch_rng"].cpu())
+    if device == "cuda" and state.get("cuda_rng") is not None:
+        torch.cuda.set_rng_state_all(state["cuda_rng"])
+    return step, epoch
 
 
 def normalize_engine_mode(env_value: str) -> str:
@@ -328,10 +382,12 @@ def _fallback_to_vanilla(exc, engine_mode, spec, r, dtype, device, train_rows, e
     return reason, engine, model, tokenizer, train_enc, eval_batches, baseline
 
 
-def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
+def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress, on_checkpoint=None) -> dict:
     import torch
+    from .budget import RuntimeClock
 
     r = spec.recipe
+    runtime = RuntimeClock(getattr(spec, "runtime", None))
     _set_all_seeds(r.seed)
     if not torch.cuda.is_available() and os.environ.get("SGL_ALLOW_CPU") != "1":
         raise InfraError(
@@ -442,9 +498,19 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
     steps_per_epoch = -(-len(train_enc) // r.batch_size)  # ceil — _batched yields the trailing partial batch
     total_steps = max(1, steps_per_epoch * r.epochs)
     step = 0
+    if getattr(spec, "resume", None) is not None:
+        step, _ = _restore_training_checkpoint(model, optim, out_dirs, device, total_steps)
+        on_progress("training", 0.10 + 0.75 * (step / total_steps),
+                    step=step, total_steps=total_steps, resumed_from_step=step)
+    early_finalized = False
+    last_checkpoint_step = 0
+    batch_index = 0
     model.train()
     for epoch in range(r.epochs):
         for ids, attn in _batched(tokenizer, train_enc, r.batch_size, device):
+            batch_index += 1
+            if batch_index <= step:
+                continue
             labels = ids.clone()
             labels[attn == 0] = -100
             loss = model(input_ids=ids, attention_mask=attn, labels=labels).loss
@@ -453,10 +519,37 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
             if step % r.grad_accum == 0:
                 optim.step()
                 optim.zero_grad()
-            if step % 10 == 0:
+            if step % 10 == 0 or runtime.should_finalize():
                 on_progress("training", 0.10 + 0.75 * (step / total_steps),
                             step=step, total_steps=total_steps,
-                            train_loss=float(loss.item()), epoch=epoch)
+                            train_loss=float(loss.item()), epoch=epoch + 1,
+                            total_epochs=r.epochs,
+                            elapsed_seconds=round(runtime.elapsed_seconds(), 3),
+                            estimated_remaining_seconds=runtime.estimated_remaining_seconds(step, total_steps))
+            if runtime.should_finalize():
+                early_finalized = True
+                break
+        if early_finalized:
+            break
+        if on_checkpoint is not None and step > last_checkpoint_step:
+            slot = "a" if epoch % 2 == 0 else "b"
+            checkpoint_dir = _save_training_checkpoint(
+                model, tokenizer, optim, out_dirs, slot, step, epoch + 1, total_steps)
+            remote = on_checkpoint(slot, checkpoint_dir, step, epoch + 1, total_steps)
+            if remote:
+                on_progress("training", 0.10 + 0.75 * (step / total_steps),
+                            step=step, total_steps=total_steps, epoch=epoch + 1,
+                            total_epochs=r.epochs, **remote)
+            last_checkpoint_step = step
+    if early_finalized and on_checkpoint is not None and step > last_checkpoint_step:
+        slot = "a" if (step // max(1, steps_per_epoch)) % 2 == 0 else "b"
+        checkpoint_dir = _save_training_checkpoint(
+            model, tokenizer, optim, out_dirs, slot, step, min(r.epochs, epoch + 1), total_steps)
+        remote = on_checkpoint(slot, checkpoint_dir, step, min(r.epochs, epoch + 1), total_steps)
+        if remote:
+            on_progress("training", 0.10 + 0.75 * (step / total_steps),
+                        step=step, total_steps=total_steps, epoch=min(r.epochs, epoch + 1),
+                        total_epochs=r.epochs, **remote)
     optim.step()
     optim.zero_grad()
 
@@ -484,7 +577,10 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress) -> dict:
     else:
         trained_repo, trained_revision = spec.hf_repo, spec.hf_revision
 
-    return {"baseline": baseline, "final": final, "steps": step, "seed": r.seed,
+    return {"baseline": baseline, "final": final, "steps": step,
+            "planned_steps": total_steps, "early_finalized": early_finalized,
+            "finalization_reason": "runtime_reserve" if early_finalized else "training_complete",
+            "seed": r.seed,
             "device": device, "dtype": actual_dtype,
             "engine": engine, "engine_fallback_reason": engine_fallback_reason,
             "trained_repo": trained_repo, "trained_revision": trained_revision}
