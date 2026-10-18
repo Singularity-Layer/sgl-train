@@ -3,6 +3,8 @@ name: build
 on:
   push:
     branches: [main]
+  pull_request:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
@@ -16,6 +18,7 @@ jobs:
       - run: python -m pytest -v
 
   build:
+    if: github.event_name == 'push'
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -34,7 +37,7 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/singularity-layer/sgl-train:v0.5.6
+            ghcr.io/singularity-layer/sgl-train:v0.6.0
             ghcr.io/singularity-layer/sgl-train:${{ github.sha }}
       - name: Print digest to pin in the backend
         run: echo "PIN THIS DIGEST → ${{ steps.push.outputs.digest }}"
@@ -45,7 +48,7 @@ jobs:
           file: Dockerfile.seed
           push: true
           tags: |
-            ghcr.io/singularity-layer/sgl-train:seed-v0.5.6
+            ghcr.io/singularity-layer/sgl-train:seed-v0.6.0
             ghcr.io/singularity-layer/sgl-train:seed-${{ github.sha }}
       - name: Print seeder digest
         run: echo "SEEDER DIGEST → ${{ steps.seed.outputs.digest }}"

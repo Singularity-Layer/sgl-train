@@ -1,10 +1,16 @@
 import hashlib
+import json
+import os
+from pathlib import Path
 
 import pytest
 
 from runner.errors import InfraError
 from runner.main import (execute, Deps, EXIT_OK, EXIT_SPEC, EXIT_DATA, EXIT_TRAIN,
-                          EXIT_UPLOAD, EXIT_INFRA, _sha256_file)
+                          EXIT_UPLOAD, EXIT_INFRA, _default_deps, _sha256_file)
+from runner.dataset import Example
+from runner.checkpoint import canonical_sha256
+from runner.spec import parse_spec
 
 BASE = {
     "run_id": "r1", "kind": "finetune",
@@ -20,6 +26,23 @@ BASE = {
 ROWS = "\n".join(
     '{"messages":[{"role":"user","content":"%d"},{"role":"assistant","content":"y"}]}' % i
     for i in range(10))
+
+
+def resume_raw(**over):
+    resume = {
+        "source_run_id": "source-1", "archive_url": "https://d.invalid/checkpoint",
+        "archive_sha256": "ab" * 32, "archive_bytes": 123, "step": 2, "epoch": 1,
+        "planned_steps": 10, "slot": "a", "model_id": "Q/M@sha",
+        "dataset_sha256": "cd" * 32,
+        "recipe_sha256": canonical_sha256(parse_spec(BASE).recipe),
+    }
+    resume.update(over)
+    return {
+        **BASE,
+        "checkpoint_urls": {"a": "https://d.invalid/a", "b": "https://d.invalid/b",
+                            "manifest": "https://d.invalid/manifest"},
+        "resume": resume,
+    }
 
 
 class SpyReporter:
@@ -149,10 +172,7 @@ def test_bad_spec_exits_without_touching_the_gpu():
 def test_resume_checkpoint_is_prepared_before_training():
     rep = SpyReporter()
     events = []
-    raw = {**BASE, "resume": {
-        "source_run_id": "source-1", "archive_url": "https://d.invalid/checkpoint",
-        "archive_sha256": "ab" * 32, "archive_bytes": 123, "step": 2, "epoch": 1,
-    }}
+    raw = resume_raw()
     deps = make_deps(
         rep,
         prepare_resume=lambda resume, archive, target: events.append((resume.step, archive, target)),
@@ -166,10 +186,7 @@ def test_resume_checkpoint_is_prepared_before_training():
 def test_resume_integrity_failure_stops_before_training():
     rep = SpyReporter()
     trained = []
-    raw = {**BASE, "resume": {
-        "source_run_id": "source-1", "archive_url": "https://d.invalid/checkpoint",
-        "archive_sha256": "ab" * 32, "archive_bytes": 123, "step": 2, "epoch": 1,
-    }}
+    raw = resume_raw()
     code = execute(raw, make_deps(
         rep, prepare_resume=lambda *_: (_ for _ in ()).throw(ValueError("hash mismatch")),
         train=lambda *_: trained.append(True),
@@ -177,6 +194,72 @@ def test_resume_integrity_failure_stops_before_training():
     assert code == EXIT_INFRA
     assert trained == []
     assert "resume checkpoint failed" in rep.results[-1][1]["error"]
+    assert rep.results[-1][1]["exit_code"] == EXIT_INFRA
+
+
+def test_absolute_runtime_budget_includes_dataset_fetch_and_validation():
+    rep = SpyReporter()
+
+    class Clock:
+        value = 0.0
+
+        def __call__(self):
+            return self.value
+
+    clock = Clock()
+    trained = []
+
+    def slow_fetch(_url):
+        clock.value = 301
+        return ROWS
+
+    raw = {**BASE, "runtime": {
+        "budget_seconds": 600, "finalization_reserve_seconds": 300,
+        "estimated_p95_seconds": 500, "profile_version": "test-v1",
+    }}
+    assert execute(raw, make_deps(rep, fetch=slow_fetch, clock=clock,
+                                  train=lambda *_: trained.append(True))) == EXIT_INFRA
+    assert trained == []
+    assert "before training" in rep.results[-1][1]["error"]
+
+
+def test_default_checkpoint_wiring_hashes_real_example_objects(monkeypatch, tmp_path):
+    raw = {
+        **BASE,
+        "checkpoint_urls": {"a": "https://d.invalid/a", "b": "https://d.invalid/b",
+                            "manifest": "https://d.invalid/manifest"},
+    }
+    spec = parse_spec(raw)
+    train_rows = [Example(messages=[{"role": "user", "content": "train"},
+                                    {"role": "assistant", "content": "ok"}])]
+    eval_rows = [Example(messages=[{"role": "user", "content": "eval"},
+                                   {"role": "assistant", "content": "ok"}])]
+    uploads = []
+    out_dirs = {
+        "checkpoint_a_dir": str(tmp_path / "checkpoint-a"),
+        "checkpoint_b_dir": str(tmp_path / "checkpoint-b"),
+        "checkpoint_a_tar": str(tmp_path / "checkpoint-a.tar.gz"),
+        "checkpoint_b_tar": str(tmp_path / "checkpoint-b.tar.gz"),
+        "checkpoint_manifest": str(tmp_path / "manifest.json"),
+    }
+
+    def fake_run(_spec, _train, _eval, dirs, _progress, on_checkpoint=None, runtime=None):
+        slot = on_checkpoint.next_slot()
+        checkpoint_dir = dirs[f"checkpoint_{slot}_dir"]
+        os.makedirs(checkpoint_dir)
+        with open(os.path.join(checkpoint_dir, "state"), "w") as handle:
+            handle.write("ok")
+        published = on_checkpoint(slot, checkpoint_dir, 1, 1, 1)
+        return published
+
+    monkeypatch.setattr("runner.trainer.run_finetune", fake_run)
+    monkeypatch.setattr("runner.main.put_file", lambda url, path, **kwargs: uploads.append(url) or True)
+    result = _default_deps().train(spec, train_rows, eval_rows, out_dirs, lambda *_a, **_k: True)
+    assert result["checkpoint_slot"] == "a"
+    assert uploads == ["https://d.invalid/a", "https://d.invalid/manifest"]
+    manifest = json.loads(Path(out_dirs["checkpoint_manifest"]).read_text())
+    assert manifest["dataset_sha256"] == canonical_sha256(
+        {"train": train_rows, "eval": eval_rows})
 
 
 def test_empty_dataset_fails_before_training():

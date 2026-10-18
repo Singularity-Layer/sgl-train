@@ -27,7 +27,7 @@ URLs and query strings embedded in diagnostic text are redacted before that
 text reaches the canary log.
 
 The bootstrap refuses to import the training stack unless
-`/workspace/sgl-train/runtime/v0.5.0/READY.json` exactly matches its runtime
+`/workspace/sgl-train/runtime/v0.6.0/READY.json` exactly matches its runtime
 schema and version. Job datasets and generated artifacts remain on ephemeral
 Pod storage; the shared volume contains only immutable dependencies and public
 model caches. This keeps concurrent customer jobs isolated while avoiding a
@@ -62,6 +62,12 @@ adapter/optimizer/RNG checkpoints and publishes the manifest last. A later job
 can receive an integrity-pinned `resume` block, verify and safely extract the
 archive, restore the adapter, optimizer and RNG state, and continue from the
 saved step on a new GPU. No GPU remains alive between runs.
+
+Resume manifests pin the base model, exact train/eval dataset split, Training
+Recipe, step, epoch and planned step count. The runner resumes only at an
+optimizer boundary, loads optimizer state with PyTorch's restricted
+`weights_only` loader, and rejects oversized or unsafe archives. Auto-tune
+sweeps cannot be combined with plain-run runtime/checkpoint/resume controls.
 
 ## Engines
 

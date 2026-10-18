@@ -18,7 +18,8 @@ from .errors import InfraError, attach_context
 from .evalmath import aggregate
 
 
-def _save_training_checkpoint(model, tokenizer, optimizer, out_dirs, slot, step, epoch, planned_steps):
+def _save_training_checkpoint(model, tokenizer, optimizer, out_dirs, slot, step, epoch, planned_steps,
+                              provenance):
     """Write a complete local checkpoint directory before any remote upload."""
     import torch
 
@@ -33,6 +34,7 @@ def _save_training_checkpoint(model, tokenizer, optimizer, out_dirs, slot, step,
         "step": step,
         "epoch": epoch,
         "planned_steps": planned_steps,
+        **provenance,
         "optimizer": optimizer.state_dict(),
         "python_rng": random.getstate(),
         "torch_rng": torch.get_rng_state(),
@@ -44,7 +46,7 @@ def _save_training_checkpoint(model, tokenizer, optimizer, out_dirs, slot, step,
     return target
 
 
-def _restore_training_checkpoint(model, optimizer, out_dirs, device, planned_steps):
+def _restore_training_checkpoint(model, optimizer, out_dirs, device, planned_steps, resume, provenance):
     """Restore adapter, optimizer, and RNG state from the verified archive."""
     import torch
     from peft.utils.save_and_load import load_peft_weights, set_peft_model_state_dict
@@ -54,11 +56,15 @@ def _restore_training_checkpoint(model, optimizer, out_dirs, device, planned_ste
     adapter_dir = os.path.join(root, "adapter")
     if not os.path.isfile(state_path) or not os.path.isdir(adapter_dir):
         raise InfraError("resume checkpoint is missing adapter or training state")
-    state = torch.load(state_path, map_location=device, weights_only=False)
+    state = torch.load(state_path, map_location=device, weights_only=True)
     step = int(state.get("step", -1))
     epoch = int(state.get("epoch", -1))
     if step < 0 or step > planned_steps or int(state.get("planned_steps", -1)) != planned_steps:
         raise InfraError("resume checkpoint does not match this Training Recipe")
+    if step != resume.step or epoch != resume.epoch:
+        raise InfraError("resume checkpoint progress does not match its signed manifest")
+    if any(state.get(key) != value for key, value in provenance.items()):
+        raise InfraError("resume checkpoint provenance does not match this run")
     weights = load_peft_weights(adapter_dir, device=device)
     result = set_peft_model_state_dict(model, weights, adapter_name="default")
     if getattr(result, "unexpected_keys", None):
@@ -69,6 +75,26 @@ def _restore_training_checkpoint(model, optimizer, out_dirs, device, planned_ste
     if device == "cuda" and state.get("cuda_rng") is not None:
         torch.cuda.set_rng_state_all(state["cuda_rng"])
     return step, epoch
+
+
+def _save_adapter_only(model, tokenizer, out_dirs, spec, engine: str) -> None:
+    """Save the paid LoRA deliverable without materializing full base weights."""
+    try:
+        shutil.rmtree(out_dirs["adapter_dir"], ignore_errors=True)
+        os.makedirs(out_dirs["adapter_dir"], exist_ok=True)
+        model.save_pretrained(out_dirs["adapter_dir"])
+        tokenizer.save_pretrained(out_dirs["adapter_dir"])
+    except Exception as e:
+        shutil.rmtree(out_dirs["adapter_dir"], ignore_errors=True)
+        raise attach_context(
+            InfraError(f"[engine={engine}] adapter save failed: {e}"),
+            engine=engine, trained_repo=spec.hf_repo,
+            trained_revision=spec.hf_revision,
+        ) from e
+
+
+def _is_optimizer_boundary(step: int, total_steps: int, grad_accum: int) -> bool:
+    return step == total_steps or step % grad_accum == 0
 
 
 def normalize_engine_mode(env_value: str) -> str:
@@ -382,12 +408,14 @@ def _fallback_to_vanilla(exc, engine_mode, spec, r, dtype, device, train_rows, e
     return reason, engine, model, tokenizer, train_enc, eval_batches, baseline
 
 
-def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress, on_checkpoint=None) -> dict:
+def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress, on_checkpoint=None,
+                 runtime=None) -> dict:
     import torch
     from .budget import RuntimeClock
 
     r = spec.recipe
-    runtime = RuntimeClock(getattr(spec, "runtime", None))
+    runtime = runtime or RuntimeClock(getattr(spec, "runtime", None))
+    setup_started = runtime.phase_started()
     _set_all_seeds(r.seed)
     if not torch.cuda.is_available() and os.environ.get("SGL_ALLOW_CPU") != "1":
         raise InfraError(
@@ -492,19 +520,37 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress, on_checkpoi
     # asked for, but unsloth was handed dtype=None and auto-picked its own.
     actual_dtype = _model_dtype(model)
 
+    runtime.record_phase("model_setup_and_preprocess", setup_started)
+    if runtime.should_finalize():
+        raise InfraError("runtime budget entered finalization reserve before training could start")
+
     optim = torch.optim.AdamW(
         [p for p in model.parameters() if p.requires_grad], lr=r.lr)
 
     steps_per_epoch = -(-len(train_enc) // r.batch_size)  # ceil — _batched yields the trailing partial batch
     total_steps = max(1, steps_per_epoch * r.epochs)
+    from .checkpoint import checkpoint_provenance, validate_resume_provenance
+    provenance = checkpoint_provenance(spec, train_rows, eval_rows)
     step = 0
     if getattr(spec, "resume", None) is not None:
-        step, _ = _restore_training_checkpoint(model, optim, out_dirs, device, total_steps)
+        try:
+            validate_resume_provenance(spec.resume, provenance, total_steps)
+        except ValueError as e:
+            raise InfraError(str(e)) from e
+        if not _is_optimizer_boundary(spec.resume.step, total_steps, r.grad_accum):
+            raise InfraError("resume checkpoint is not at an optimizer boundary")
+        expected_epoch = 0 if spec.resume.step == 0 else ((spec.resume.step - 1) // steps_per_epoch) + 1
+        if spec.resume.epoch != expected_epoch:
+            raise InfraError("resume checkpoint epoch does not match its step")
+        step, _ = _restore_training_checkpoint(
+            model, optim, out_dirs, device, total_steps, spec.resume, provenance)
         on_progress("training", 0.10 + 0.75 * (step / total_steps),
                     step=step, total_steps=total_steps, resumed_from_step=step)
     early_finalized = False
     last_checkpoint_step = 0
     batch_index = 0
+    training_started = runtime.phase_started()
+    finalize_requested = False
     model.train()
     for epoch in range(r.epochs):
         for ids, attn in _batched(tokenizer, train_enc, r.batch_size, device):
@@ -516,7 +562,8 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress, on_checkpoi
             loss = model(input_ids=ids, attention_mask=attn, labels=labels).loss
             (loss / r.grad_accum).backward()
             step += 1
-            if step % r.grad_accum == 0:
+            boundary = _is_optimizer_boundary(step, total_steps, r.grad_accum)
+            if boundary:
                 optim.step()
                 optim.zero_grad()
             if step % 10 == 0 or runtime.should_finalize():
@@ -525,16 +572,21 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress, on_checkpoi
                             train_loss=float(loss.item()), epoch=epoch + 1,
                             total_epochs=r.epochs,
                             elapsed_seconds=round(runtime.elapsed_seconds(), 3),
-                            estimated_remaining_seconds=runtime.estimated_remaining_seconds(step, total_steps))
+                            estimated_remaining_seconds=runtime.estimated_remaining_seconds(
+                                step, total_steps, training_started))
             if runtime.should_finalize():
-                early_finalized = True
+                finalize_requested = True
+            if finalize_requested and boundary:
+                early_finalized = step < total_steps
                 break
         if early_finalized:
             break
-        if on_checkpoint is not None and step > last_checkpoint_step:
-            slot = "a" if epoch % 2 == 0 else "b"
+        if (on_checkpoint is not None and step > last_checkpoint_step
+                and _is_optimizer_boundary(step, total_steps, r.grad_accum)):
+            slot = on_checkpoint.next_slot()
             checkpoint_dir = _save_training_checkpoint(
-                model, tokenizer, optim, out_dirs, slot, step, epoch + 1, total_steps)
+                model, tokenizer, optim, out_dirs, slot, step, epoch + 1, total_steps,
+                provenance)
             remote = on_checkpoint(slot, checkpoint_dir, step, epoch + 1, total_steps)
             if remote:
                 on_progress("training", 0.10 + 0.75 * (step / total_steps),
@@ -542,26 +594,28 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress, on_checkpoi
                             total_epochs=r.epochs, **remote)
             last_checkpoint_step = step
     if early_finalized and on_checkpoint is not None and step > last_checkpoint_step:
-        slot = "a" if (step // max(1, steps_per_epoch)) % 2 == 0 else "b"
+        slot = on_checkpoint.next_slot()
         checkpoint_dir = _save_training_checkpoint(
-            model, tokenizer, optim, out_dirs, slot, step, min(r.epochs, epoch + 1), total_steps)
+            model, tokenizer, optim, out_dirs, slot, step, min(r.epochs, epoch + 1), total_steps,
+            provenance)
         remote = on_checkpoint(slot, checkpoint_dir, step, min(r.epochs, epoch + 1), total_steps)
         if remote:
             on_progress("training", 0.10 + 0.75 * (step / total_steps),
                         step=step, total_steps=total_steps, epoch=min(r.epochs, epoch + 1),
                         total_epochs=r.epochs, **remote)
-    optim.step()
-    optim.zero_grad()
-
     on_progress("final_eval", 0.88)
+    finalization_started = runtime.phase_started()
     final = _evaluate(model, eval_batches)
 
     on_progress("saving", 0.92)
-    if engine == "unsloth":
+    if early_finalized:
+        _save_adapter_only(model, tokenizer, out_dirs, spec, engine)
+    elif engine == "unsloth":
         from .trainer_unsloth import save_unsloth
         save_unsloth(model, tokenizer, out_dirs, r.load_in_4bit, spec)
     else:
         _save_vanilla(model, tokenizer, out_dirs, spec)
+    runtime.record_phase("final_eval_and_save", finalization_started)
 
     # Honesty: which repo+revision ACTUALLY trained. vanilla trains spec.hf_repo
     # @ spec.hf_revision directly; unsloth trains the pinned MIRROR instead (see
@@ -580,6 +634,7 @@ def run_finetune(spec, train_rows, eval_rows, out_dirs, on_progress, on_checkpoi
     return {"baseline": baseline, "final": final, "steps": step,
             "planned_steps": total_steps, "early_finalized": early_finalized,
             "finalization_reason": "runtime_reserve" if early_finalized else "training_complete",
+            "runtime_phase_seconds": runtime.phase_seconds,
             "seed": r.seed,
             "device": device, "dtype": actual_dtype,
             "engine": engine, "engine_fallback_reason": engine_fallback_reason,

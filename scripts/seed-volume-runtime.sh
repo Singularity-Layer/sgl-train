@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Populate a versioned runtime atomically. READY.json is written last, so paid
 # Pods reject a partial install even when this container is interrupted.
-version="${SGL_RUNTIME_VERSION:-v0.5.0}"
+version="${SGL_RUNTIME_VERSION:-v0.6.0}"
 dest="${SGL_RUNTIME_ROOT:-/workspace/sgl-train/runtime/${version}}"
 stage="${dest}.staging.$$"
 llama_tag="${LLAMA_CPP_TAG:-b9867}"

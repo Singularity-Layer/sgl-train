@@ -82,6 +82,11 @@ class ResumeCheckpoint:
     archive_bytes: int
     step: int
     epoch: int
+    planned_steps: int
+    slot: str
+    model_id: str
+    dataset_sha256: str
+    recipe_sha256: str
 
 
 MAX_TRIALS = 6
@@ -306,6 +311,10 @@ def parse_spec(raw: dict) -> JobSpec:
     runtime = _parse_runtime(raw.get("runtime"))
     checkpoint_urls = _parse_checkpoint_urls(raw.get("checkpoint_urls"))
     resume = _parse_resume(raw.get("resume"))
+    if autotune is not None and (runtime is not None or checkpoint_urls is not None or resume is not None):
+        raise SpecError("autotune cannot be combined with runtime, checkpoint_urls, or resume")
+    if resume is not None and checkpoint_urls is None:
+        raise SpecError("resume requires checkpoint_urls so progress can continue safely")
 
     return JobSpec(
         run_id=run_id,
@@ -430,11 +439,33 @@ def _parse_resume(raw: object) -> ResumeCheckpoint | None:
     digest = str(_req(raw, "archive_sha256", "resume"))
     if not re.fullmatch(r"[a-f0-9]{64}", digest):
         raise SpecError("resume: archive_sha256 must be lowercase sha256")
+    dataset_digest = str(_req(raw, "dataset_sha256", "resume"))
+    recipe_digest = str(_req(raw, "recipe_sha256", "resume"))
+    if not re.fullmatch(r"[a-f0-9]{64}", dataset_digest):
+        raise SpecError("resume: dataset_sha256 must be lowercase sha256")
+    if not re.fullmatch(r"[a-f0-9]{64}", recipe_digest):
+        raise SpecError("resume: recipe_sha256 must be lowercase sha256")
+    model_id = str(_req(raw, "model_id", "resume"))
+    if not model_id or len(model_id) > 512:
+        raise SpecError("resume: model_id is invalid")
+    slot = str(_req(raw, "slot", "resume"))
+    if slot not in {"a", "b"}:
+        raise SpecError("resume: slot must be a or b")
+    step = _runtime_int("resume.step", raw.get("step"), 0, 10_000_000)
+    epoch = _runtime_int("resume.epoch", raw.get("epoch"), 0, 10_000)
+    planned_steps = _runtime_int("resume.planned_steps", raw.get("planned_steps"), 1, 10_000_000)
+    if step > planned_steps:
+        raise SpecError("resume: step cannot exceed planned_steps")
     return ResumeCheckpoint(
         source_run_id=source,
         archive_url=archive_url,
         archive_sha256=digest,
         archive_bytes=_runtime_int("resume.archive_bytes", raw.get("archive_bytes"), 1, 20 * 1024**3),
-        step=_runtime_int("resume.step", raw.get("step"), 0, 10_000_000),
-        epoch=_runtime_int("resume.epoch", raw.get("epoch"), 0, 10_000),
+        step=step,
+        epoch=epoch,
+        planned_steps=planned_steps,
+        slot=slot,
+        model_id=model_id,
+        dataset_sha256=dataset_digest,
+        recipe_sha256=recipe_digest,
     )

@@ -1,5 +1,6 @@
 import pytest
 from runner.spec import parse_spec, SpecError
+from runner.checkpoint import canonical_sha256
 
 BASE = {
     "run_id": "11111111-1111-1111-1111-111111111111",
@@ -54,9 +55,16 @@ def test_rejects_partial_checkpoint_upload_slots():
 
 
 def test_parses_a_pinned_resume_checkpoint():
-    raw = {**BASE, "resume": {
+    raw = {**BASE, "checkpoint_urls": {
+        "a": "https://example.invalid/a", "b": "https://example.invalid/b",
+        "manifest": "https://example.invalid/manifest",
+    }, "resume": {
         "source_run_id": "source-1", "archive_url": "https://example.invalid/checkpoint",
         "archive_sha256": "ab" * 32, "archive_bytes": 1234, "step": 20, "epoch": 1,
+        "planned_steps": 30, "slot": "a",
+        "model_id": "Qwen/Qwen2.5-0.5B-Instruct@abc123",
+        "dataset_sha256": "cd" * 32,
+        "recipe_sha256": canonical_sha256(parse_spec(BASE).recipe),
     }}
     spec = parse_spec(raw)
     assert spec.resume is not None
@@ -66,6 +74,34 @@ def test_parses_a_pinned_resume_checkpoint():
 def test_rejects_a_resume_checkpoint_without_integrity_metadata():
     with pytest.raises(SpecError, match="resume"):
         parse_spec({**BASE, "resume": {"source_run_id": "source-1", "archive_url": "https://example.invalid/x"}})
+
+
+@pytest.mark.parametrize("extra", ["resume", "checkpoint_urls", "runtime"])
+def test_rejects_autotune_reliability_modes_that_cannot_share_one_budget(extra):
+    raw = {**BASE, "autotune": {
+        "trials": [{"lr": 2e-4, "lora_rank": 16, "epochs": 1}],
+        "budget_seconds": 3600, "trial_estimate_seconds": 600,
+        "reserve_seconds": 600, "experiment_url": "https://example.invalid/experiment",
+    }}
+    if extra == "runtime":
+        raw[extra] = {"budget_seconds": 3600, "finalization_reserve_seconds": 600,
+                      "estimated_p95_seconds": 1800, "profile_version": "v1"}
+    elif extra == "checkpoint_urls":
+        raw[extra] = {"a": "https://example.invalid/a", "b": "https://example.invalid/b",
+                      "manifest": "https://example.invalid/manifest"}
+    else:
+        raw["checkpoint_urls"] = {"a": "https://example.invalid/a", "b": "https://example.invalid/b",
+                                  "manifest": "https://example.invalid/manifest"}
+        raw[extra] = {
+            "source_run_id": "source-1", "archive_url": "https://example.invalid/checkpoint",
+            "archive_sha256": "ab" * 32, "archive_bytes": 10, "step": 1, "epoch": 1,
+            "planned_steps": 10, "slot": "a",
+            "model_id": "Qwen/Qwen2.5-0.5B-Instruct@abc123",
+            "dataset_sha256": "cd" * 32,
+            "recipe_sha256": canonical_sha256(parse_spec(BASE).recipe),
+        }
+    with pytest.raises(SpecError, match="autotune cannot"):
+        parse_spec(raw)
 
 
 @pytest.mark.parametrize("runtime", [
