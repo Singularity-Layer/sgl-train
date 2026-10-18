@@ -41,11 +41,44 @@ def load_artifact(path: str, device: str = "cuda", dtype=None):
         head.load_state_dict(load_file(str(root / "joint_head.safetensors")), strict=True)
         model = ClefModel(backbone, head.to(device=device, dtype=dtype)).eval()
     else:
-        model, processor = load_release_model(root, device=device, dtype=dtype)
-    return model, processor, float(runtime.get("temperature", 1.0))
+        if str(device) == "mps":
+            # Accelerate's direct MPS device-map load can crash before the first
+            # tensor is materialized. Load on CPU, then transfer explicitly.
+            from transformers import Qwen3_5ForConditionalGeneration
+
+            processor = AutoProcessor.from_pretrained(root)
+            backbone = Qwen3_5ForConditionalGeneration.from_pretrained(
+                root, dtype=dtype)
+            backbone = backbone.to(device)
+            backbone.config.use_cache = False
+            head_config = json.loads(
+                (root / "joint_head_config.json").read_text(encoding="utf-8"))
+            head = JointSchemaHead(**head_config)
+            head.load_state_dict(
+                load_file(str(root / "joint_head.safetensors")), strict=True)
+            model = ClefModel(
+                backbone, head.to(device=device, dtype=dtype)).eval()
+        else:
+            model, processor = load_release_model(root, device=device, dtype=dtype)
+    temperature = runtime.get("temperature_by_type", runtime.get("temperature", 1.0))
+    return model, processor, temperature
 
 
-def systemone(model: Any, processor: Any, request: dict, temperature: float = 1.0,
+def _temperature_for(question: dict, temperature: Any) -> float:
+    if isinstance(temperature, dict):
+        value = temperature.get(question.get("type"), 1.0)
+    elif isinstance(temperature, (list, tuple)):
+        order = {"choice": 0, "score": 1, "noul": 2}
+        index = order.get(question.get("type"))
+        value = temperature[index] if index is not None and index < len(temperature) else 1.0
+    else:
+        value = temperature
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+        raise ValueError("temperature must be positive")
+    return float(value)
+
+
+def systemone(model: Any, processor: Any, request: dict, temperature: Any = 1.0,
               max_length: int = 16384) -> dict:
     import torch
     try:  # artifact folder
@@ -62,9 +95,6 @@ def systemone(model: Any, processor: Any, request: dict, temperature: float = 1.
         raise ValueError("model and state are required")
     if not isinstance(questions, dict) or not questions:
         raise ValueError("at least one question is required")
-    if not isinstance(temperature, (int, float)) or temperature <= 0:
-        raise ValueError("temperature must be positive")
-
     encoded = encode_record(
         processor.tokenizer, request, max_length=max_length, processor=processor)
     device = next(model.parameters()).device
@@ -73,7 +103,9 @@ def systemone(model: Any, processor: Any, request: dict, temperature: float = 1.
             [encoded], processor.tokenizer.pad_token_id, device))[0]
     answers = {}
     for question, values in zip(encoded.questions, logits):
-        probabilities = (values.float() / float(temperature)).softmax(-1).tolist()
+        question_temperature = _temperature_for(
+            questions[question.question_id], temperature)
+        probabilities = (values.float() / question_temperature).softmax(-1).tolist()
         answers[question.question_id] = systemone_answer(
             questions[question.question_id], dict(zip(question.option_ids, probabilities)))
     return {

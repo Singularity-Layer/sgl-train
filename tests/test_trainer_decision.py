@@ -14,6 +14,7 @@ from runner.trainer_decision import (
     validate_artifact_manifest,
     verify_systemone_artifact,
 )
+from runner.decision_systemone import _temperature_for
 
 
 BASE = {
@@ -296,5 +297,12 @@ def test_temperature_is_fitted_only_from_supplied_holdout_logits():
         [[8.0, 0.0], [8.0, 0.0], [0.0, 8.0]], [0, 1, 1], [0, 1, 2])
     assert 0.25 <= temperature <= 4.0
     assert set(metrics) == {"accuracy", "ece", "loss", "record_accuracy"}
+
+
+def test_systemone_supports_per_question_type_temperatures():
+    temperatures = {"choice": 1.1, "score": 0.9, "noul": 0.5}
+    assert _temperature_for({"type": "choice"}, temperatures) == 1.1
+    assert _temperature_for({"type": "noul"}, temperatures) == 0.5
+    assert _temperature_for({"type": "score"}, [1.1, 0.9, 0.5]) == 0.9
 
 
