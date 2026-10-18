@@ -67,16 +67,13 @@ def upload_checkpoint(
     *, urls: dict[str, str], checkpoint_dir: str, archive_path: str,
     manifest_path: str, slot: str, step: int, epoch: int, planned_steps: int,
     model_id: str, dataset_sha256: str, recipe_sha256: str,
-    upload: Callable[..., bool],
+    upload: Callable[[str, str], bool],
 ) -> dict | None:
     if slot not in {"a", "b"}:
         raise ValueError("checkpoint slot must be a or b")
     tar_dir(checkpoint_dir, archive_path)
     archive_sha256, archive_bytes = _sha256(archive_path)
-    if not upload(
-        urls[slot], archive_path,
-        headers={"x-amz-meta-sha256": archive_sha256},
-    ):
+    if not upload(urls[slot], archive_path):
         return None
     manifest = {
         "version": 1,
@@ -111,7 +108,7 @@ class CheckpointPublisher:
     """Publish to the slot opposite the last committed manifest."""
 
     def __init__(self, *, urls: dict[str, str], out_dirs: dict[str, str],
-                 provenance: dict[str, str], upload: Callable[..., bool],
+                 provenance: dict[str, str], upload: Callable[[str, str], bool],
                  active_slot: str | None = None):
         self.urls = urls
         self.out_dirs = out_dirs

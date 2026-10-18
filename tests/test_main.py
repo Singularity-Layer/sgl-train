@@ -253,7 +253,7 @@ def test_default_checkpoint_wiring_hashes_real_example_objects(monkeypatch, tmp_
         return published
 
     monkeypatch.setattr("runner.trainer.run_finetune", fake_run)
-    monkeypatch.setattr("runner.main.put_file", lambda url, path, **kwargs: uploads.append(url) or True)
+    monkeypatch.setattr("runner.main.put_file", lambda url, path: uploads.append(url) or True)
     result = _default_deps().train(spec, train_rows, eval_rows, out_dirs, lambda *_a, **_k: True)
     assert result["checkpoint_slot"] == "a"
     assert uploads == ["https://d.invalid/a", "https://d.invalid/manifest"]

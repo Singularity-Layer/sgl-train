@@ -33,10 +33,8 @@ def test_checkpoint_archive_uploads_before_atomic_manifest(tmp_path):
     manifest_path = tmp_path / "manifest.json"
     events = []
 
-    def upload(url, path, headers=None):
+    def upload(url, path):
         events.append((url, Path(path).name))
-        if url == "https://x/a":
-            assert headers == {"x-amz-meta-sha256": hashlib.sha256(Path(path).read_bytes()).hexdigest()}
         return True
 
     result = upload_checkpoint(
@@ -72,7 +70,7 @@ def test_failed_archive_never_publishes_manifest(tmp_path):
         checkpoint_dir=str(checkpoint), archive_path=str(tmp_path / "b.tar.gz"),
         manifest_path=str(tmp_path / "manifest.json"), slot="b", step=1, epoch=1,
         planned_steps=2, model_id="m", dataset_sha256="a" * 64, recipe_sha256="b" * 64,
-        upload=lambda url, path, **kwargs: events.append(url) or False,
+        upload=lambda url, path: events.append(url) or False,
     )
     assert result is None
     assert events == ["https://x/b"]
@@ -125,7 +123,7 @@ def test_publisher_uses_opposite_slot_and_advances_only_after_manifest_commit(tm
     uploads = []
     fail_manifest_once = {"value": True}
 
-    def upload(url, path, **kwargs):
+    def upload(url, path):
         uploads.append(url)
         if url == "manifest" and fail_manifest_once["value"]:
             fail_manifest_once["value"] = False

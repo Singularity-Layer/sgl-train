@@ -57,9 +57,9 @@ def _urllib_put(url: str, path: str, headers: dict[str, str]) -> int:
             return 599
 
 
-def put_file(url: str, path: str, put=None, headers: dict[str, str] | None = None) -> bool:
+def put_file(url: str, path: str, put=None) -> bool:
     # Streamed, not read into RAM: adapter/gguf artifacts can be gigabytes and this
     # runs on the same box that just held a model in memory for training.
     sender = put or _urllib_put
-    status = sender(url, path, {"Content-Type": "application/octet-stream", **(headers or {})})
+    status = sender(url, path, {"Content-Type": "application/octet-stream"})
     return 200 <= status < 300
