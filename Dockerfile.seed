@@ -19,8 +19,8 @@ FROM python:3.10-slim-bookworm@sha256:db6ee5170ebce0f4d165af242e8e77addc08bd9ffc
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    SGL_RUNTIME_VERSION=v0.6.0 \
-    SGL_RUNTIME_ROOT=/workspace/sgl-train/runtime/v0.6.0 \
+    SGL_RUNTIME_VERSION=v0.7.0 \
+    SGL_RUNTIME_ROOT=/workspace/sgl-train/runtime/v0.7.0 \
     LD_LIBRARY_PATH=/opt/sgl/conda/lib
 
 COPY --from=libstdcpp /opt/sgl/conda /opt/sgl/conda
@@ -30,4 +30,5 @@ RUN apt-get update -y \
  && rm -rf /var/lib/apt/lists/*
 
 COPY scripts/seed-volume-runtime.sh /usr/local/bin/seed-volume-runtime
+COPY scripts/decision-runtime-constraints.txt /opt/sgl/decision-runtime-constraints.txt
 ENTRYPOINT ["/usr/local/bin/seed-volume-runtime"]

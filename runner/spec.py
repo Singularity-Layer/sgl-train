@@ -339,6 +339,11 @@ def parse_spec(raw: dict) -> JobSpec:
         raise SpecError("resume requires checkpoint_urls so progress can continue safely")
     if kind == "decision_finetune" and autotune is not None:
         raise SpecError("spec: decision_finetune does not support autotune yet")
+    if kind == "decision_finetune" and any(
+        value is not None for value in (runtime, checkpoint_urls, resume)
+    ):
+        raise SpecError(
+            "spec: decision_finetune does not support runtime checkpoints or resume yet")
 
     return JobSpec(
         run_id=run_id,

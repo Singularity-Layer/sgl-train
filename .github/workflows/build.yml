@@ -44,8 +44,8 @@ jobs:
         shell: bash
         run: |
           if [[ "${{ github.event_name }}" == "push" ]]; then
-            runner_release="ghcr.io/singularity-layer/sgl-train:v0.6.0"
-            seed_release="ghcr.io/singularity-layer/sgl-train:seed-v0.6.0"
+            runner_release="ghcr.io/singularity-layer/sgl-train:v0.7.0"
+            seed_release="ghcr.io/singularity-layer/sgl-train:seed-v0.7.0"
           else
             runner_release="ghcr.io/singularity-layer/sgl-train:candidate-${GITHUB_SHA}"
             seed_release="ghcr.io/singularity-layer/sgl-train:seed-candidate-${GITHUB_SHA}"

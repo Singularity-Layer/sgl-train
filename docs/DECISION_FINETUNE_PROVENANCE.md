@@ -40,9 +40,10 @@ and unchanged.
 
 ## Runtime gate
 
-The active `v0.5.0` volume predates Qwen3.5 and this decision lane. Do not
-mutate that immutable runtime in place. A separately versioned runtime must be
-resolved from `scripts/decision-runtime-constraints.txt`, then pass an NVIDIA/CUDA canary covering model load, NF4
+The active `v0.6.0` volume predates this decision lane. Do not mutate that
+immutable runtime in place. Candidate `v0.7.0` isolates the stack pinned in
+`scripts/decision-runtime-constraints.txt` from the ordinary LoRA/QLoRA
+environment. It must pass an NVIDIA/CUDA canary covering model load, NF4
 LoRA, a backward step through the head and adapters, calibration, adapter
 reload, merged reload, and System One inference before backend enablement.
 

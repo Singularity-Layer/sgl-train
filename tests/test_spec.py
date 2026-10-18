@@ -201,6 +201,24 @@ def test_decision_spec_rejects_autotune_until_decision_scoring_contract_exists()
         parse_spec(raw)
 
 
+@pytest.mark.parametrize("field,value", [
+    ("runtime", {
+        "budget_seconds": 3600,
+        "finalization_reserve_seconds": 600,
+        "estimated_p95_seconds": 1800,
+        "profile_version": "v1",
+    }),
+    ("checkpoint_urls", {
+        "a": "https://example.invalid/a.tar.gz",
+        "b": "https://example.invalid/b.tar.gz",
+        "manifest": "https://example.invalid/manifest.json",
+    }),
+])
+def test_decision_spec_rejects_unimplemented_reliability_controls(field, value):
+    with pytest.raises(SpecError, match="does not support runtime checkpoints or resume"):
+        parse_spec(_decision_spec(**{field: value}))
+
+
 def test_rejects_a_path_traversal_run_id():
     with pytest.raises(SpecError, match="run_id"):
         parse_spec({**BASE, "run_id": "../etc"})
