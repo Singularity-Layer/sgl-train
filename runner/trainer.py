@@ -73,7 +73,10 @@ def _restore_training_checkpoint(model, optimizer, out_dirs, device, planned_ste
     random.setstate(state["python_rng"])
     torch.set_rng_state(state["torch_rng"].cpu())
     if device == "cuda" and state.get("cuda_rng") is not None:
-        torch.cuda.set_rng_state_all(state["cuda_rng"])
+        # map_location=device moves every serialized tensor, including CUDA's
+        # RNG snapshots, onto the GPU. PyTorch's RNG restore API deliberately
+        # accepts CPU ByteTensors only, so move each snapshot back before use.
+        torch.cuda.set_rng_state_all([rng.cpu() for rng in state["cuda_rng"]])
     return step, epoch
 
 

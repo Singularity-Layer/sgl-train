@@ -197,14 +197,14 @@ def test_restore_uses_safe_weights_only_loading(monkeypatch, tmp_path):
 
     class Cuda:
         @staticmethod
-        def set_rng_state_all(_state):
-            pass
+        def set_rng_state_all(state):
+            captured["cuda_rng"] = state
 
     torch = types.SimpleNamespace(
         load=lambda path, **kw: captured.update(kw) or {
             "step": 10, "epoch": 1, "planned_steps": 20, **provenance,
             "optimizer": {}, "python_rng": random.getstate(), "torch_rng": types.SimpleNamespace(cpu=lambda: b"rng"),
-            "cuda_rng": None,
+            "cuda_rng": [types.SimpleNamespace(cpu=lambda: b"cuda-rng")],
         },
         set_rng_state=lambda _state: None,
         cuda=Cuda(),
@@ -219,5 +219,6 @@ def test_restore_uses_safe_weights_only_loading(monkeypatch, tmp_path):
 
     optimizer = types.SimpleNamespace(load_state_dict=lambda _state: None)
     trainer._restore_training_checkpoint(
-        object(), optimizer, {"resume_dir": str(root)}, "cpu", 20, resume, provenance)
+        object(), optimizer, {"resume_dir": str(root)}, "cuda", 20, resume, provenance)
     assert captured["weights_only"] is True
+    assert captured["cuda_rng"] == [b"cuda-rng"]
