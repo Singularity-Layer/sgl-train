@@ -132,6 +132,35 @@ def test_save_vanilla_success_leaves_both_dirs_populated(tmp_path):
     assert os.path.exists(os.path.join(out_dirs["merged_dir"], "model.safetensors"))
 
 
+def test_early_save_writes_only_adapter_and_never_merges_base_model(tmp_path):
+    class _Model:
+        def __init__(self):
+            self.merged = False
+
+        def save_pretrained(self, path):
+            os.makedirs(path, exist_ok=True)
+            with open(os.path.join(path, "adapter.bin"), "w") as fh:
+                fh.write("adapter")
+
+        def merge_and_unload(self):
+            self.merged = True
+            raise AssertionError("early finalization must not merge base weights")
+
+    model = _Model()
+    out_dirs = _out_dirs(tmp_path)
+    trainer._save_adapter_only(model, _FakeTokenizer(), out_dirs, _spec(), "vanilla")
+    assert os.path.exists(os.path.join(out_dirs["adapter_dir"], "adapter.bin"))
+    assert not os.path.exists(out_dirs["merged_dir"])
+    assert model.merged is False
+
+
+@pytest.mark.parametrize("step,total,accum,expected", [
+    (1, 10, 4, False), (4, 10, 4, True), (8, 10, 4, True), (10, 10, 4, True),
+])
+def test_optimizer_boundary_matches_gradient_accumulation(step, total, accum, expected):
+    assert trainer._is_optimizer_boundary(step, total, accum) is expected
+
+
 # --- trainer_unsloth.save_unsloth --------------------------------------------
 
 class _UnslothMergeRaises:

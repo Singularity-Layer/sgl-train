@@ -1,5 +1,6 @@
 import pytest
 from runner.spec import parse_spec, SpecError
+from runner.checkpoint import canonical_sha256
 
 BASE = {
     "run_id": "11111111-1111-1111-1111-111111111111",
@@ -23,6 +24,94 @@ def test_parses_a_valid_spec():
     assert s.hf_repo == "Qwen/Qwen2.5-0.5B-Instruct"
     assert s.hf_revision == "abc123"
     assert s.recipe.seed == 1234
+
+
+def test_parses_a_runtime_budget_for_plain_runs():
+    raw = {**BASE, "runtime": {
+        "budget_seconds": 7_200,
+        "finalization_reserve_seconds": 1_200,
+        "estimated_p95_seconds": 5_400,
+        "profile_version": "2026-10-16-p95-v1",
+    }}
+    s = parse_spec(raw)
+    assert s.runtime is not None
+    assert s.runtime.budget_seconds == 7_200
+    assert s.runtime.finalization_reserve_seconds == 1_200
+
+
+def test_parses_private_checkpoint_upload_slots():
+    raw = {**BASE, "checkpoint_urls": {
+        "a": "https://example.invalid/checkpoint-a",
+        "b": "https://example.invalid/checkpoint-b",
+        "manifest": "https://example.invalid/checkpoint-manifest",
+    }}
+    spec = parse_spec(raw)
+    assert spec.checkpoint_urls["a"].endswith("checkpoint-a")
+
+
+def test_rejects_partial_checkpoint_upload_slots():
+    with pytest.raises(SpecError, match="checkpoint_urls"):
+        parse_spec({**BASE, "checkpoint_urls": {"a": "https://example.invalid/a"}})
+
+
+def test_parses_a_pinned_resume_checkpoint():
+    raw = {**BASE, "checkpoint_urls": {
+        "a": "https://example.invalid/a", "b": "https://example.invalid/b",
+        "manifest": "https://example.invalid/manifest",
+    }, "resume": {
+        "source_run_id": "source-1", "archive_url": "https://example.invalid/checkpoint",
+        "archive_sha256": "ab" * 32, "archive_bytes": 1234, "step": 20, "epoch": 1,
+        "planned_steps": 30, "slot": "a",
+        "model_id": "Qwen/Qwen2.5-0.5B-Instruct@abc123",
+        "dataset_sha256": "cd" * 32,
+        "recipe_sha256": canonical_sha256(parse_spec(BASE).recipe),
+    }}
+    spec = parse_spec(raw)
+    assert spec.resume is not None
+    assert spec.resume.step == 20
+
+
+def test_rejects_a_resume_checkpoint_without_integrity_metadata():
+    with pytest.raises(SpecError, match="resume"):
+        parse_spec({**BASE, "resume": {"source_run_id": "source-1", "archive_url": "https://example.invalid/x"}})
+
+
+@pytest.mark.parametrize("extra", ["resume", "checkpoint_urls", "runtime"])
+def test_rejects_autotune_reliability_modes_that_cannot_share_one_budget(extra):
+    raw = {**BASE, "autotune": {
+        "trials": [{"lr": 2e-4, "lora_rank": 16, "epochs": 1}],
+        "budget_seconds": 3600, "trial_estimate_seconds": 600,
+        "reserve_seconds": 600, "experiment_url": "https://example.invalid/experiment",
+    }}
+    if extra == "runtime":
+        raw[extra] = {"budget_seconds": 3600, "finalization_reserve_seconds": 600,
+                      "estimated_p95_seconds": 1800, "profile_version": "v1"}
+    elif extra == "checkpoint_urls":
+        raw[extra] = {"a": "https://example.invalid/a", "b": "https://example.invalid/b",
+                      "manifest": "https://example.invalid/manifest"}
+    else:
+        raw["checkpoint_urls"] = {"a": "https://example.invalid/a", "b": "https://example.invalid/b",
+                                  "manifest": "https://example.invalid/manifest"}
+        raw[extra] = {
+            "source_run_id": "source-1", "archive_url": "https://example.invalid/checkpoint",
+            "archive_sha256": "ab" * 32, "archive_bytes": 10, "step": 1, "epoch": 1,
+            "planned_steps": 10, "slot": "a",
+            "model_id": "Qwen/Qwen2.5-0.5B-Instruct@abc123",
+            "dataset_sha256": "cd" * 32,
+            "recipe_sha256": canonical_sha256(parse_spec(BASE).recipe),
+        }
+    with pytest.raises(SpecError, match="autotune cannot"):
+        parse_spec(raw)
+
+
+@pytest.mark.parametrize("runtime", [
+    {"budget_seconds": 300, "finalization_reserve_seconds": 100, "estimated_p95_seconds": 1, "profile_version": "v1"},
+    {"budget_seconds": 3_600, "finalization_reserve_seconds": 3_600, "estimated_p95_seconds": 1, "profile_version": "v1"},
+    {"budget_seconds": 3_600, "finalization_reserve_seconds": 900, "estimated_p95_seconds": 1, "profile_version": "bad version!"},
+])
+def test_rejects_an_unsafe_runtime_budget(runtime):
+    with pytest.raises(SpecError, match="runtime"):
+        parse_spec({**BASE, "runtime": runtime})
 
 
 def test_rejects_missing_revision():

@@ -51,6 +51,7 @@ class Deps:
     clock: Callable = time.monotonic
     rmtree: Callable = lambda p: shutil.rmtree(p, ignore_errors=True)
     sha256: Callable | None = None        # (path) -> (hex, bytes) | None
+    prepare_resume: Callable | None = None  # (resume_spec, archive_path, target_dir) -> path
 
 
 def execute(raw_spec: dict, deps: Deps) -> int:
@@ -63,6 +64,33 @@ def execute(raw_spec: dict, deps: Deps) -> int:
 
     rep = deps.reporter_factory(spec)
     dirs = paths(spec.run_id)
+    from .budget import RuntimeClock
+    from .checkpoint import canonical_sha256
+    runtime = RuntimeClock(spec.runtime, clock=deps.clock)
+
+    if spec.resume is not None:
+        if (spec.resume.model_id != f"{spec.hf_repo}@{spec.hf_revision}"
+                or spec.resume.recipe_sha256 != canonical_sha256(spec.recipe)):
+            rep.result("failed", {"error": "resume checkpoint provenance does not match this model or Training Recipe",
+                                  "exit_code": EXIT_INFRA})
+            return EXIT_INFRA
+        if deps.prepare_resume is None:
+            rep.result("failed", {"error": "resume checkpoint support is unavailable in this image",
+                                  "exit_code": EXIT_INFRA})
+            return EXIT_INFRA
+        try:
+            rep.progress("resuming_checkpoint", 0.01)
+            phase_started = runtime.phase_started()
+            deps.prepare_resume(spec.resume, dirs["resume_archive"], dirs["resume_dir"])
+            runtime.record_phase("resume_download", phase_started)
+        except Exception as e:
+            rep.result("failed", {"error": f"resume checkpoint failed: {e}",
+                                  "exit_code": EXIT_INFRA})
+            return EXIT_INFRA
+        if runtime.should_finalize():
+            rep.result("failed", {"error": "runtime budget entered finalization reserve during resume download",
+                                  "exit_code": EXIT_INFRA})
+            return EXIT_INFRA
 
     if spec.kind != "finetune":
         rep.result("failed", {"error": f"kind '{spec.kind}' is not supported by this image"})
@@ -71,6 +99,7 @@ def execute(raw_spec: dict, deps: Deps) -> int:
     # First liveness signal BEFORE the fetch loop — a run stuck in fetch retries
     # (up to 3 slow timeouts) must not look dead to the watchdog.
     rep.progress("fetching_dataset", 0.02)
+    data_started = runtime.phase_started()
     raw_dataset = None
     fetch_error: Exception | None = None
     for attempt in range(1, FETCH_ATTEMPTS + 1):
@@ -102,14 +131,22 @@ def execute(raw_spec: dict, deps: Deps) -> int:
     except Exception as e:
         rep.result("failed", {"error": f"dataset error: {e}"})
         return EXIT_DATA
+    runtime.record_phase("dataset_fetch_and_validation", data_started)
+    if runtime.should_finalize():
+        rep.result("failed", {"error": "runtime budget entered finalization reserve before training",
+                              "exit_code": EXIT_INFRA})
+        return EXIT_INFRA
 
     if spec.autotune is not None:
         return _execute_autotune(spec, rows, stats, deps, rep, dirs)
 
     try:
-        outcome = deps.train(spec, train_rows, eval_rows, dirs, rep.progress)
+        if spec.runtime is None:
+            outcome = deps.train(spec, train_rows, eval_rows, dirs, rep.progress)
+        else:
+            outcome = deps.train(spec, train_rows, eval_rows, dirs, rep.progress, runtime)
     except InfraError as e:
-        payload = {"error": str(e)}
+        payload = {"error": str(e), "exit_code": EXIT_INFRA}
         # Merge any attached context (engine, trained_repo, trained_revision).
         ctx = getattr(e, 'sgl_context', {})
         payload.update(ctx)
@@ -125,11 +162,18 @@ def execute(raw_spec: dict, deps: Deps) -> int:
 
     # GGUF is a nice-to-have. Losing it costs deploy-to-grid, not the run.
     gguf_ok, gguf_error = True, None
-    try:
-        rep.progress("converting", 0.94)
-        deps.convert(dirs["merged_dir"], dirs["gguf"], spec.quantize)
-    except Exception as e:
-        gguf_ok, gguf_error = False, str(e)
+    if outcome.get("early_finalized"):
+        gguf_ok = False
+        gguf_error = "skipped to deliver the adapter within the prepaid runtime"
+    else:
+        conversion_started = runtime.phase_started()
+        try:
+            rep.progress("converting", 0.94)
+            deps.convert(dirs["merged_dir"], dirs["gguf"], spec.quantize)
+        except Exception as e:
+            gguf_ok, gguf_error = False, str(e)
+        finally:
+            runtime.record_phase("gguf_conversion", conversion_started)
 
     report = {
         "run_id": spec.run_id,
@@ -137,6 +181,10 @@ def execute(raw_spec: dict, deps: Deps) -> int:
         "base_revision": spec.hf_revision,
         "seed": outcome["seed"],
         "steps": outcome["steps"],
+        "planned_steps": outcome.get("planned_steps", outcome["steps"]),
+        "partial_completion": bool(outcome.get("early_finalized")),
+        "finalization_reason": outcome.get("finalization_reason", "training_complete"),
+        "runtime_phase_seconds": outcome.get("runtime_phase_seconds", runtime.phase_seconds),
         "baseline": outcome["baseline"],
         "final": outcome["final"],
         "improved": improved(outcome["baseline"]["eval_loss"],
@@ -161,6 +209,7 @@ def execute(raw_spec: dict, deps: Deps) -> int:
     # a failed (refundable, exit 5) run. Everything after it is optional and
     # can never turn a delivered run into a failure (_deliver_extras).
     try:
+        delivery_started = runtime.phase_started()
         rep.progress("uploading", 0.97)
         deps.tar(dirs["adapter_dir"], dirs["adapter_tar"])
         adapter_ok = deps.upload(spec.artifact_urls["adapter"], dirs["adapter_tar"])
@@ -170,6 +219,7 @@ def execute(raw_spec: dict, deps: Deps) -> int:
     if not adapter_ok:
         rep.result("failed", {"error": "adapter upload failed", **report})
         return EXIT_UPLOAD
+    runtime.record_phase("adapter_pack_and_upload", delivery_started)
     _deliver_extras(deps, spec, dirs, dirs["report"], report)
 
     if not rep.result("completed", report):
@@ -450,9 +500,29 @@ def _lazy_evaluate(model_ref, revision, rows, recipe):
 def _default_deps() -> Deps:
     from .convert import to_gguf
     from .trainer import run_finetune
+    from .checkpoint import prepare_resume_checkpoint
+
+    def train_with_checkpoints(spec, train_rows, eval_rows, out_dirs, on_progress, runtime=None):
+        if not spec.checkpoint_urls:
+            return run_finetune(
+                spec, train_rows, eval_rows, out_dirs, on_progress, runtime=runtime)
+        from .checkpoint import CheckpointPublisher, checkpoint_provenance
+        publish = CheckpointPublisher(
+            urls=spec.checkpoint_urls,
+            out_dirs=out_dirs,
+            provenance=checkpoint_provenance(spec, train_rows, eval_rows),
+            upload=put_file,
+            active_slot=spec.resume.slot if spec.resume is not None else None,
+        )
+
+        return run_finetune(
+            spec, train_rows, eval_rows, out_dirs, on_progress,
+            on_checkpoint=publish, runtime=runtime,
+        )
+
     return Deps(
         fetch=_http_get,
-        train=run_finetune,
+        train=train_with_checkpoints,
         convert=to_gguf,
         upload=put_file,
         reporter_factory=lambda s: Reporter(s.progress_url, s.result_url, s.token, s.run_id),
@@ -460,6 +530,7 @@ def _default_deps() -> Deps:
         tar=tar_dir,
         evaluate=_lazy_evaluate,
         sha256=_sha256_file,
+        prepare_resume=prepare_resume_checkpoint,
     )
 
 

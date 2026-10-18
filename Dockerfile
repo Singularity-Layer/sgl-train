@@ -22,8 +22,8 @@ FROM python:3.10-slim-bookworm@sha256:db6ee5170ebce0f4d165af242e8e77addc08bd9ffc
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
-    SGL_RUNTIME_VERSION=v0.5.0 \
-    SGL_RUNTIME_ROOT=/workspace/sgl-train/runtime/v0.5.0 \
+    SGL_RUNTIME_VERSION=v0.6.0 \
+    SGL_RUNTIME_ROOT=/workspace/sgl-train/runtime/v0.6.0 \
     SGL_WORKDIR=/tmp/sgl/work \
     HF_HOME=/workspace/sgl-train/cache/huggingface \
     TORCH_HOME=/workspace/sgl-train/cache/torch \
