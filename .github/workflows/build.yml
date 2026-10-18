@@ -6,6 +6,12 @@ on:
   pull_request:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      publish_candidate:
+        description: Publish immutable candidate images for a reviewed commit
+        required: true
+        type: boolean
+        default: false
 
 jobs:
   test:
@@ -18,7 +24,9 @@ jobs:
       - run: python -m pytest -v
 
   build:
-    if: github.event_name == 'push'
+    if: >-
+      github.event_name == 'push' ||
+      (github.event_name == 'workflow_dispatch' && inputs.publish_candidate == true)
     needs: test
     runs-on: ubuntu-latest
     permissions:
@@ -31,14 +39,33 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Select image tags
+        id: tags
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "push" ]]; then
+            runner_release="ghcr.io/singularity-layer/sgl-train:v0.6.0"
+            seed_release="ghcr.io/singularity-layer/sgl-train:seed-v0.6.0"
+          else
+            runner_release="ghcr.io/singularity-layer/sgl-train:candidate-${GITHUB_SHA}"
+            seed_release="ghcr.io/singularity-layer/sgl-train:seed-candidate-${GITHUB_SHA}"
+          fi
+          {
+            echo "runner<<EOF"
+            echo "${runner_release}"
+            echo "ghcr.io/singularity-layer/sgl-train:${GITHUB_SHA}"
+            echo "EOF"
+            echo "seed<<EOF"
+            echo "${seed_release}"
+            echo "ghcr.io/singularity-layer/sgl-train:seed-${GITHUB_SHA}"
+            echo "EOF"
+          } >> "${GITHUB_OUTPUT}"
       - uses: docker/build-push-action@v6
         id: push
         with:
           context: .
           push: true
-          tags: |
-            ghcr.io/singularity-layer/sgl-train:v0.6.0
-            ghcr.io/singularity-layer/sgl-train:${{ github.sha }}
+          tags: ${{ steps.tags.outputs.runner }}
       - name: Print digest to pin in the backend
         run: echo "PIN THIS DIGEST → ${{ steps.push.outputs.digest }}"
       - uses: docker/build-push-action@v6
@@ -47,8 +74,6 @@ jobs:
           context: .
           file: Dockerfile.seed
           push: true
-          tags: |
-            ghcr.io/singularity-layer/sgl-train:seed-v0.6.0
-            ghcr.io/singularity-layer/sgl-train:seed-${{ github.sha }}
+          tags: ${{ steps.tags.outputs.seed }}
       - name: Print seeder digest
         run: echo "SEEDER DIGEST → ${{ steps.seed.outputs.digest }}"

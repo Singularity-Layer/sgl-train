@@ -7,7 +7,19 @@ ROOT = Path(__file__).parents[1]
 def test_pull_requests_run_tests_without_publishing_images():
     workflow = (ROOT / ".github/workflows/build.yml").read_text()
     assert "pull_request:" in workflow
-    assert "if: github.event_name == 'push'" in workflow
+    assert "inputs.publish_candidate == true" in workflow
+
+
+def test_manual_candidate_publish_is_opt_in_and_never_uses_release_tags():
+    workflow = (ROOT / ".github/workflows/build.yml").read_text()
+    assert "publish_candidate:" in workflow
+    assert "type: boolean" in workflow
+    assert "default: false" in workflow
+    assert 'runner_release="ghcr.io/singularity-layer/sgl-train:candidate-${GITHUB_SHA}"' in workflow
+    assert 'seed_release="ghcr.io/singularity-layer/sgl-train:seed-candidate-${GITHUB_SHA}"' in workflow
+    assert 'echo "ghcr.io/singularity-layer/sgl-train:${GITHUB_SHA}"' in workflow
+    assert 'echo "ghcr.io/singularity-layer/sgl-train:seed-${GITHUB_SHA}"' in workflow
+    assert 'if [[ "${{ github.event_name }}" == "push" ]]' in workflow
 
 
 def test_package_image_and_seed_runtime_versions_stay_in_sync():
