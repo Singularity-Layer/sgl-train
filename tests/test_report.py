@@ -107,3 +107,14 @@ def test_backoff_grows_and_is_bounded():
     assert len(d) == 6
     assert d[0] < d[1] < d[2]
     assert all(x <= 60.0 for x in d)
+
+
+def test_callbacks_send_an_explicit_user_agent_not_python_urllib():
+    seen = []
+    r = Reporter("https://x/p", "https://x/r", "tok", "run-1",
+                 post=lambda url, body, headers: seen.append(headers) or 200, sleep=lambda s: None)
+    r.progress("training", 0.5)
+    r.result("succeeded", {})
+    assert seen and all(h.get("User-Agent", "").startswith("sgl-train-runner/") for h in seen)
+    assert not any("Python-urllib" in h.get("User-Agent", "") for h in seen)
+

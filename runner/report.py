@@ -40,6 +40,13 @@ def backoff_delays(attempts: int, base: float = 1.0) -> list[float]:
     return out
 
 
+# Cloudflare's Browser Integrity Check answers Python's default "Python-urllib/x.y"
+# user agent with 403 (error 1010) before the request reaches the backend. A 4xx is
+# treated as permanent below, so without an explicit agent no heartbeat or result
+# ever arrives and the backend watchdog refunds a run that actually trained.
+USER_AGENT = "sgl-train-runner/0.6 (+https://www.x402layer.cc)"
+
+
 def _urllib_post(url: str, body: bytes, headers: dict[str, str]) -> int:
     req = urllib.request.Request(url, data=body, headers=headers, method="POST")
     try:
@@ -64,7 +71,8 @@ class Reporter:
     def _send(self, url: str, body: dict, attempts: int) -> bool:
         payload = json.dumps(body).encode()
         headers = {"Content-Type": "application/json",
-                   "Authorization": f"Bearer {self.token}"}
+                   "Authorization": f"Bearer {self.token}",
+                   "User-Agent": USER_AGENT}
         delays = backoff_delays(attempts)
         for i in range(attempts):
             status = self._post(url, payload, headers)
