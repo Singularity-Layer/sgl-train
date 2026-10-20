@@ -145,6 +145,80 @@ def test_rejects_unknown_quantize():
         parse_spec({**BASE, "quantize": "Q99_ULTRA"})
 
 
+def _decision_spec(**updates):
+    base = {
+        **BASE,
+        "kind": "decision_finetune",
+        "base_model": {
+            **BASE["base_model"],
+            "decision_repo": "Qwen/Qwen3.5-0.8B",
+            "decision_revision": "decision-sha",
+        },
+        "artifact_urls": {
+            "adapter": "https://example.invalid/a",
+            "merged": "https://example.invalid/m",
+            "report": "https://example.invalid/r",
+        },
+        "recipe": {**BASE["recipe"], "load_in_4bit": True},
+    }
+    base.pop("quantize", None)
+    base.update(updates)
+    return base
+
+
+def test_decision_spec_uses_adapter_head_and_optional_merged_without_gguf():
+    spec = parse_spec(_decision_spec())
+    assert spec.kind == "decision_finetune"
+    assert spec.quantize is None
+    assert set(spec.artifact_urls) == {"adapter", "merged", "report"}
+
+
+def test_decision_spec_rejects_quantization_and_gguf_artifacts():
+    with pytest.raises(SpecError, match="does not support GGUF"):
+        parse_spec(_decision_spec(quantize="Q4_K_M"))
+    raw = _decision_spec()
+    raw["artifact_urls"] = {**raw["artifact_urls"], "gguf": "https://example.invalid/g"}
+    with pytest.raises(SpecError, match="must not advertise"):
+        parse_spec(raw)
+
+
+def test_decision_spec_requires_an_independent_decision_model_pin():
+    raw = _decision_spec()
+    raw["base_model"] = BASE["base_model"]
+    with pytest.raises(SpecError, match="pinned decision repo"):
+        parse_spec(raw)
+
+
+def test_decision_spec_rejects_autotune_until_decision_scoring_contract_exists():
+    raw = _decision_spec(autotune={
+        "trials": [{"lr": 2e-4, "lora_rank": 16, "lora_alpha": 16, "epochs": 1}],
+        "budget_seconds": 3600,
+        "trial_estimate_seconds": 600,
+        "reserve_seconds": 60,
+        "experiment_url": "https://example.invalid/experiments",
+    })
+    with pytest.raises(SpecError, match="does not support autotune"):
+        parse_spec(raw)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("runtime", {
+        "budget_seconds": 3600,
+        "finalization_reserve_seconds": 600,
+        "estimated_p95_seconds": 1800,
+        "profile_version": "v1",
+    }),
+    ("checkpoint_urls", {
+        "a": "https://example.invalid/a.tar.gz",
+        "b": "https://example.invalid/b.tar.gz",
+        "manifest": "https://example.invalid/manifest.json",
+    }),
+])
+def test_decision_spec_rejects_unimplemented_reliability_controls(field, value):
+    with pytest.raises(SpecError, match="does not support runtime checkpoints or resume"):
+        parse_spec(_decision_spec(**{field: value}))
+
+
 def test_rejects_a_path_traversal_run_id():
     with pytest.raises(SpecError, match="run_id"):
         parse_spec({**BASE, "run_id": "../etc"})

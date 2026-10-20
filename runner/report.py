@@ -19,7 +19,7 @@ PROGRESS_ATTEMPTS = 3
 RESULT_ATTEMPTS = 6
 MAX_DELAY = 60.0
 
-_CANARY_TEXT_FIELDS = {"error", "engine_fallback_reason", "gguf_error"}
+_CANARY_TEXT_FIELDS = {"error", "engine_fallback_reason", "gguf_error", "merged_error"}
 _URL_RE = re.compile(r"\b[a-z][a-z0-9+.-]*://[^\s<>\"']+", re.IGNORECASE)
 _QUERY_RE = re.compile(r"\?[^\s<>\"']*=[^\s<>\"']*")
 
@@ -103,6 +103,7 @@ class Reporter:
                 "engine_fallback_reason", "trained_repo", "steps", "gguf_ok",
                 "gguf_error", "adapter_sha256", "adapter_bytes",
                 "gguf_sha256", "gguf_bytes",
+                "merged_ok", "merged_error", "merged_sha256", "merged_bytes",
             }
             safe = {}
             for key, value in body.items():

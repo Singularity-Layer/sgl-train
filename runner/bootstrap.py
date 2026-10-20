@@ -9,10 +9,24 @@ from pathlib import Path
 from typing import Callable
 
 RUNTIME_SCHEMA = 1
+STANDARD_LANE = "standard"
+DECISION_LANE = "decision"
 
 
 class RuntimeNotReady(RuntimeError):
     pass
+
+
+def runtime_lane(env: dict[str, str] | None = None) -> str:
+    """Select the isolated dependency lane before importing either ML stack."""
+    values = os.environ if env is None else env
+    if values.get("SGL_RUNTIME_PROBE", "").strip().lower() == DECISION_LANE:
+        return DECISION_LANE
+    try:
+        raw = json.loads(values.get("SGL_JOB_SPEC", ""))
+    except (TypeError, ValueError):
+        return STANDARD_LANE
+    return DECISION_LANE if isinstance(raw, dict) and raw.get("kind") == "decision_finetune" else STANDARD_LANE
 
 
 def prepare_runtime(env: dict[str, str] | None = None) -> Path:
@@ -31,11 +45,13 @@ def prepare_runtime(env: dict[str, str] | None = None) -> Path:
     if marker != {"schema": RUNTIME_SCHEMA, "version": expected}:
         raise RuntimeNotReady("runtime marker does not match this bootstrap")
 
-    site_packages = root / "site-packages"
+    lane = runtime_lane(values)
+    site_packages = root / ("decision-site-packages" if lane == DECISION_LANE else "site-packages")
     if not site_packages.is_dir():
-        raise RuntimeNotReady("runtime site-packages directory is missing")
+        raise RuntimeNotReady(f"runtime {lane} site-packages directory is missing")
     sys.path.insert(0, str(site_packages))
     site.addsitedir(str(site_packages))
+    values["SGL_RUNTIME_LANE"] = lane
 
     values["SGL_LLAMA_ROOT"] = str(root / "llama.cpp")
     values["SGL_CONVERT_ROOT"] = str(root / "convert-venv")
@@ -79,9 +95,18 @@ def runtime_probe() -> int:
     """Exercise the actual GPU libraries without customer data or callbacks."""
     try:
         import torch
-        import xformers  # noqa: F401
         import bitsandbytes as bnb
         from bitsandbytes.cextension import lib as bnb_lib
+
+        lane = os.environ.get("SGL_RUNTIME_LANE", STANDARD_LANE)
+        if lane == STANDARD_LANE:
+            import xformers  # noqa: F401
+        elif lane == DECISION_LANE:
+            import peft
+            import transformers
+            from ._vendor.cloudflare_clef import joint_schema_model  # noqa: F401
+        else:
+            raise RuntimeError(f"unknown runtime lane: {lane}")
 
         if not torch.cuda.is_available():
             raise RuntimeError("CUDA is unavailable")
@@ -102,6 +127,9 @@ def runtime_probe() -> int:
             "torch": torch.__version__,
             "cuda": torch.version.cuda,
             "bitsandbytes_cuda": True,
+            "lane": lane,
+            **({"transformers": transformers.__version__, "peft": peft.__version__}
+               if lane == DECISION_LANE else {}),
         }), flush=True)
         return 0
     except Exception as exc:  # noqa: BLE001 — probe must emit one bounded failure

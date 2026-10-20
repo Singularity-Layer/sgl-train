@@ -1,0 +1,7 @@
+# DARK until the CUDA canary in docs/DECISION_FINETUNE_PROVENANCE.md passes.
+# Cloudflare's Clef release reports torch 2.11 + transformers 5.10.2.
+torch==2.11.0
+transformers==5.10.2
+peft==0.21.2
+bitsandbytes==0.50.2
+safetensors==0.8.0

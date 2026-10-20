@@ -11,7 +11,7 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlsplit
 
-KINDS = {"finetune", "scratch", "autoresearch"}
+KINDS = {"finetune", "decision_finetune", "scratch", "autoresearch"}
 QUANTIZE = {"Q4_K_M", "Q5_K_M", "Q8_0"}
 
 _RUN_ID_RE = re.compile(r"[A-Za-z0-9_-]{1,64}")
@@ -98,12 +98,14 @@ class JobSpec:
     kind: str
     hf_repo: str
     hf_revision: str
+    decision_repo: str | None
+    decision_revision: str | None
     unsloth_repo: str | None
     unsloth_revision: str | None
     unsloth_4bit_repo: str | None
     unsloth_4bit_revision: str | None
     dataset_url: str
-    quantize: str
+    quantize: str | None
     progress_url: str
     result_url: str
     token: str
@@ -226,9 +228,17 @@ def parse_spec(raw: dict) -> JobSpec:
     if kind not in KINDS:
         raise SpecError(f"spec: unknown kind '{kind}'")
 
-    quantize = str(_req(raw, "quantize", "spec"))
-    if quantize not in QUANTIZE:
-        raise SpecError(f"spec: unknown quantize '{quantize}'")
+    if kind == "decision_finetune":
+        # Clef heads are not part of the standard llama.cpp GGUF contract.
+        # A decision job must never look successful merely because a plain-LM
+        # GGUF was produced without the trained head.
+        if raw.get("quantize") not in (None, ""):
+            raise SpecError("spec: decision_finetune does not support GGUF quantization")
+        quantize = None
+    else:
+        quantize = str(_req(raw, "quantize", "spec"))
+        if quantize not in QUANTIZE:
+            raise SpecError(f"spec: unknown quantize '{quantize}'")
 
     base = raw.get("base_model") or {}
     if not isinstance(base, dict):
@@ -237,6 +247,11 @@ def parse_spec(raw: dict) -> JobSpec:
     # Fail-closed: an unpinned model means an unreproducible run, which means the
     # result can never be verified. Mirrors the sha256 pin on GGUF downloads.
     hf_revision = str(_req(base, "revision", "base_model"))
+    # Optional, independently pinned source for the permissive Clef/PEFT lane.
+    # It is deliberately separate from the legacy Unsloth mirror pins used by
+    # ordinary SFT/QLoRA.
+    decision_repo, decision_revision = _optional_pair(
+        base, "decision_repo", "decision_revision", "base_model")
     # OPTIONAL: the unsloth engine's own mirror pin (e.g.
     # "unsloth/Qwen2.5-0.5B-Instruct" @ its own sha, NOT hf_repo/hf_revision's
     # sha). unsloth's FastLanguageModel.from_pretrained silently remaps a
@@ -284,12 +299,19 @@ def parse_spec(raw: dict) -> JobSpec:
         seed=seed,
         load_in_4bit=_parse_bool_flag("load_in_4bit", raw_recipe.get("load_in_4bit", False)),
     )
+    if kind == "decision_finetune":
+        if not decision_repo or not decision_revision:
+            raise SpecError("base_model: decision_finetune requires a pinned decision repo")
 
     artifact_urls = raw.get("artifact_urls") or {}
     if not isinstance(artifact_urls, dict):
         raise SpecError("spec: artifact_urls must be an object")
-    for key in ("adapter", "gguf", "report"):
+    required_artifacts = ("adapter", "report") if kind == "decision_finetune" else (
+        "adapter", "gguf", "report")
+    for key in required_artifacts:
         _req(artifact_urls, key, "artifact_urls")
+    if kind == "decision_finetune" and "gguf" in artifact_urls:
+        raise SpecError("artifact_urls: decision_finetune must not advertise a GGUF artifact")
     artifact_urls = {k: str(v) for k, v in artifact_urls.items()}
     for key, value in artifact_urls.items():
         _check_url(f"artifact_urls.{key}", value)
@@ -315,12 +337,21 @@ def parse_spec(raw: dict) -> JobSpec:
         raise SpecError("autotune cannot be combined with runtime, checkpoint_urls, or resume")
     if resume is not None and checkpoint_urls is None:
         raise SpecError("resume requires checkpoint_urls so progress can continue safely")
+    if kind == "decision_finetune" and autotune is not None:
+        raise SpecError("spec: decision_finetune does not support autotune yet")
+    if kind == "decision_finetune" and any(
+        value is not None for value in (runtime, checkpoint_urls, resume)
+    ):
+        raise SpecError(
+            "spec: decision_finetune does not support runtime checkpoints or resume yet")
 
     return JobSpec(
         run_id=run_id,
         kind=kind,
         hf_repo=hf_repo,
         hf_revision=hf_revision,
+        decision_repo=decision_repo,
+        decision_revision=decision_revision,
         unsloth_repo=unsloth_repo,
         unsloth_revision=unsloth_revision,
         unsloth_4bit_repo=unsloth_4bit_repo,

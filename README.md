@@ -27,7 +27,7 @@ URLs and query strings embedded in diagnostic text are redacted before that
 text reaches the canary log.
 
 The bootstrap refuses to import the training stack unless
-`/workspace/sgl-train/runtime/v0.6.0/READY.json` exactly matches its runtime
+`/workspace/sgl-train/runtime/v0.7.0/READY.json` exactly matches its runtime
 schema and version. Job datasets and generated artifacts remain on ephemeral
 Pod storage; the shared volume contains only immutable dependencies and public
 model caches. This keeps concurrent customer jobs isolated while avoiding a
@@ -78,6 +78,14 @@ regardless of which one ran:
 - **vanilla** — plain `transformers` + `peft`. Always available; no 4-bit.
 - **unsloth** — faster kernels, and the only engine that supports QLoRA
   (`recipe.load_in_4bit`).
+
+The repository also contains a **dark, canary-gated** `decision_finetune` lane
+for typed Clef decisions. It is isolated in a separate pinned dependency
+environment so the released language-model path cannot drift.
+Read [`docs/DECISION_FINETUNE_PROVENANCE.md`](docs/DECISION_FINETUNE_PROVENANCE.md)
+before building or enabling it. The lane uses a vendored Apache-2.0 Cloudflare
+Clef head plus an independent PyTorch/PEFT training loop and still requires a
+separately canaried dependency stack.
 
 `SGL_ENGINE` selects which one runs (default `auto`):
 

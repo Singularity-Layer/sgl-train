@@ -3,7 +3,7 @@ set -euo pipefail
 
 # Populate a versioned runtime atomically. READY.json is written last, so paid
 # Pods reject a partial install even when this container is interrupted.
-version="${SGL_RUNTIME_VERSION:-v0.6.0}"
+version="${SGL_RUNTIME_VERSION:-v0.7.0}"
 dest="${SGL_RUNTIME_ROOT:-/workspace/sgl-train/runtime/${version}}"
 stage="${dest}.staging.$$"
 llama_tag="${LLAMA_CPP_TAG:-b9867}"
@@ -71,6 +71,27 @@ assert u.find_spec('unsloth'), 'unsloth not installed'
 assert u.find_spec('unsloth_zoo'), 'unsloth_zoo not installed'
 PY
 
+echo "[seed] creating isolated decision-model runtime"
+python3.10 -m venv "$stage/decision-venv"
+decision_python="$stage/decision-venv/bin/python"
+decision_pip="$stage/decision-venv/bin/pip"
+"$decision_pip" install --upgrade "pip==25.2" "setuptools==80.9.0" "wheel==0.45.1"
+"$decision_pip" install -r /opt/sgl/decision-runtime-constraints.txt \
+  "accelerate==1.12.0" \
+  "sentencepiece==0.2.1" \
+  "protobuf==6.33.5" \
+  "pillow==12.1.0" \
+  "regex==2026.1.15"
+
+echo "[seed] verifying decision dependency closure"
+"$decision_python" - <<'PY'
+import torch, transformers, peft, bitsandbytes, safetensors
+assert torch.__version__.split('+')[0] == '2.11.0', torch.__version__
+assert transformers.__version__ == '5.10.2', transformers.__version__
+assert peft.__version__ == '0.21.2', peft.__version__
+assert safetensors.__version__ == '0.8.0', safetensors.__version__
+PY
+
 echo "[seed] installing pinned GGUF conversion tools"
 git clone --depth 1 --branch "$llama_tag" https://github.com/ggml-org/llama.cpp "$stage/llama.cpp"
 python3.10 -m venv "$stage/convert-venv"
@@ -90,6 +111,7 @@ chmod +x "$stage/bin/llama-quantize"
 # Existing bootstrap expects this stable path. The symlink points at the pinned
 # venv inside the same immutable runtime directory.
 ln -s "venv/lib/python3.10/site-packages" "$stage/site-packages"
+ln -s "decision-venv/lib/python3.10/site-packages" "$stage/decision-site-packages"
 printf '{"schema":1,"version":"%s"}\n' "$version" > "$stage/READY.json"
 chmod -R a-w "$stage"
 mv "$stage" "$dest"

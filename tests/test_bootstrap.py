@@ -3,7 +3,7 @@ import sys
 
 import pytest
 
-from runner.bootstrap import RuntimeNotReady, prepare_runtime, run, runtime_probe
+from runner.bootstrap import RuntimeNotReady, prepare_runtime, run, runtime_lane, runtime_probe
 
 
 def test_prepare_runtime_requires_exact_marker(tmp_path):
@@ -37,6 +37,35 @@ def test_prepare_runtime_wires_exact_cached_paths(tmp_path):
         assert (tmp_path / "hf").is_dir()
     finally:
         sys.path[:] = old_path
+
+
+def test_prepare_runtime_selects_isolated_decision_dependencies(tmp_path):
+    standard = tmp_path / "site-packages"
+    decision = tmp_path / "decision-site-packages"
+    standard.mkdir()
+    decision.mkdir()
+    (tmp_path / "READY.json").write_text(json.dumps({"schema": 1, "version": "v0.7.0"}))
+    env = {
+        "SGL_RUNTIME_VERSION": "v0.7.0",
+        "SGL_RUNTIME_ROOT": str(tmp_path),
+        "SGL_JOB_SPEC": json.dumps({"kind": "decision_finetune"}),
+        "SGL_WORKDIR": str(tmp_path / "work"),
+        "HF_HOME": str(tmp_path / "hf"),
+        "PATH": "/usr/bin",
+        "LD_LIBRARY_PATH": "",
+    }
+    old_path = list(sys.path)
+    try:
+        assert runtime_lane(env) == "decision"
+        assert prepare_runtime(env) == tmp_path
+        assert sys.path[0] == str(decision)
+        assert env["SGL_RUNTIME_LANE"] == "decision"
+    finally:
+        sys.path[:] = old_path
+
+
+def test_decision_probe_selects_decision_lane_without_a_job_spec():
+    assert runtime_lane({"SGL_RUNTIME_PROBE": "decision"}) == "decision"
 
 
 def test_run_fails_closed_before_entrypoint_when_cache_is_absent(monkeypatch):
