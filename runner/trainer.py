@@ -673,3 +673,45 @@ def evaluate_rows(model_ref: str, revision: str | None, rows, recipe) -> dict:
         del model
         if device == "cuda":
             torch.cuda.empty_cache()
+
+
+def generate_answers(model_ref: str, revision: str | None, prompts, recipe,
+                     max_new_tokens: int = 256, batch_size: int = 8) -> list[str]:
+    """One greedy answer per prompt (a list of chat messages) from a saved
+    model: the pinned base repo@revision or a local merged dir. Same plain
+    transformers load as evaluate_rows, one load per model, batched and
+    left-padded so each model costs a few generate calls, not one per prompt.
+    The prompt is cut from the LEFT to max_seq_len so the question survives.
+    """
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    dtype = torch.bfloat16 if (device == "cuda" and torch.cuda.is_bf16_supported()) else (
+        torch.float16 if device == "cuda" else torch.float32)
+    kw = {"revision": revision} if revision else {}
+    tokenizer = AutoTokenizer.from_pretrained(model_ref, **kw)
+    if tokenizer.pad_token_id is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+    tokenizer.truncation_side = "left"
+    model = AutoModelForCausalLM.from_pretrained(model_ref, torch_dtype=dtype, device_map=None, **kw).to(device)
+    model.eval()
+    out: list[str] = []
+    try:
+        texts = [tokenizer.apply_chat_template(p, tokenize=False, add_generation_prompt=True)
+                 for p in prompts]
+        with torch.no_grad():
+            for i in range(0, len(texts), batch_size):
+                enc = tokenizer(texts[i:i + batch_size], return_tensors="pt", padding=True,
+                                truncation=True, max_length=recipe.max_seq_len,
+                                add_special_tokens=False).to(device)
+                gen = model.generate(**enc, max_new_tokens=max_new_tokens, do_sample=False,
+                                     pad_token_id=tokenizer.pad_token_id)
+                new = gen[:, enc["input_ids"].shape[1]:]
+                out.extend(tokenizer.batch_decode(new, skip_special_tokens=True))
+        return out
+    finally:
+        del model
+        if device == "cuda":
+            torch.cuda.empty_cache()
