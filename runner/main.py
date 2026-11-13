@@ -19,6 +19,7 @@ import urllib.request
 from dataclasses import dataclass, replace
 from typing import Callable
 
+from . import samples as samples_mod
 from .artifacts import paths, put_file, tar_dir
 from .dataset import load_jsonl, split
 from .errors import InfraError
@@ -34,6 +35,12 @@ EXIT_UPLOAD = 5
 EXIT_INFRA = 6
 
 FETCH_ATTEMPTS = 3
+
+
+def _write_bytes(path: str, data: bytes) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "wb") as fh:
+        fh.write(data)
 
 
 @dataclass(frozen=True)
@@ -52,6 +59,9 @@ class Deps:
     rmtree: Callable = lambda p: shutil.rmtree(p, ignore_errors=True)
     sha256: Callable | None = None        # (path) -> (hex, bytes) | None
     prepare_resume: Callable | None = None  # (resume_spec, archive_path, target_dir) -> path
+    # Sample answers only (spec.artifact_urls.samples). None = no samples.
+    generate: Callable | None = None      # (model_ref, revision, prompts, recipe, max_new_tokens) -> [str]
+    write_bytes: Callable = _write_bytes
 
 
 def execute(raw_spec: dict, deps: Deps) -> int:
@@ -126,7 +136,7 @@ def execute(raw_spec: dict, deps: Deps) -> int:
                 "error": f"dataset unusable: {stats.kept} valid rows of {stats.total}",
                 "dataset_stats": stats.__dict__})
             return EXIT_DATA
-        if spec.autotune is None:
+        if spec.autotune is None and spec.refine is None:
             train_rows, eval_rows = split(rows, spec.recipe.eval_split, spec.recipe.seed)
     except Exception as e:
         rep.result("failed", {"error": f"dataset error: {e}"})
@@ -139,6 +149,8 @@ def execute(raw_spec: dict, deps: Deps) -> int:
 
     if spec.autotune is not None:
         return _execute_autotune(spec, rows, stats, deps, rep, dirs)
+    if spec.refine is not None:
+        return _execute_refine(spec, rows, stats, deps, rep, dirs)
 
     try:
         if spec.runtime is None:
@@ -220,6 +232,14 @@ def execute(raw_spec: dict, deps: Deps) -> int:
         rep.result("failed", {"error": "adapter upload failed", **report})
         return EXIT_UPLOAD
     runtime.record_phase("adapter_pack_and_upload", delivery_started)
+    # Samples come AFTER the adapter is delivered, and only when the runtime
+    # budget still has room on top of its finalization reserve.
+    remaining = runtime.remaining_seconds()
+    samples_time_ok = not outcome.get("early_finalized") and (
+        remaining is None
+        or remaining - spec.runtime.finalization_reserve_seconds >= samples_mod.ESTIMATE_SECONDS)
+    report.update(_samples_stage(deps, spec, dirs, rep, eval_rows, dirs["merged_dir"],
+                                 spec.recipe, samples_time_ok, 0.98))
     _deliver_extras(deps, spec, dirs, dirs["report"], report)
 
     if not rep.result("completed", report):
@@ -287,7 +307,66 @@ def _sha256_file(path: str) -> tuple[str, int] | None:
     return h.hexdigest(), n
 
 
+def _samples_stage(deps: Deps, spec, dirs: dict, rep, test_rows, tuned_ref: str,
+                   recipe, time_ok: bool, pct: float) -> dict:
+    """Before/after answers on up to 40 TEST prompts, uploaded as samples.jsonl.
+
+    Returns the report fields to add. No samples URL = no work and no fields.
+    Best-effort by construction: every failure becomes samples_ok false and
+    nothing raises, so a samples problem can never fail a run or change its
+    exit code."""
+    url = spec.artifact_urls.get("samples")
+    if not url:
+        return {}
+    out: dict = {"samples_ok": False, "samples_count": 0, "samples_bytes": 0,
+                 "samples_sha256": None, "samples_error": None}
+    if not time_ok:
+        out["samples_error"] = "skipped: not enough time left in the block"
+        return out
+    if deps.generate is None:
+        out["samples_error"] = "sample generation is unavailable in this image"
+        return out
+    try:
+        rep.progress("generating_samples", pct)
+        picked = samples_mod.pick(test_rows)
+        if not picked:
+            raise ValueError("no usable prompts in the test split")
+        prompts = [msgs for msgs, _ in picked]
+        before = list(deps.generate(spec.hf_repo, spec.hf_revision, prompts, recipe,
+                                    samples_mod.MAX_NEW_TOKENS))
+        after = list(deps.generate(tuned_ref, None, prompts, recipe, samples_mod.MAX_NEW_TOKENS))
+        data, lines = samples_mod.build(picked, before, after)
+        quality = samples_mod.exact_match([ref for _, ref in picked], before, after)
+        if quality is not None:
+            out["quality"] = quality
+        path = os.path.join(dirs["root"], "samples.jsonl")
+        deps.write_bytes(path, data)
+        if not deps.upload(url, path):
+            raise RuntimeError("samples upload failed")
+    except Exception as e:  # noqa: BLE001 - samples are never worth a failed run
+        out["samples_error"] = str(e)[:300]
+        print(f"[sgl] samples skipped (non-fatal): {out['samples_error']}", file=sys.stderr)
+        return out
+    out.update({"samples_ok": True, "samples_count": len(lines), "samples_bytes": len(data),
+                "samples_sha256": samples_mod.sha256_bytes(data)})
+    return out
+
+
 def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
+    return _execute_sweep(spec, rows, stats, deps, rep, dirs, spec.autotune, spec.autotune.trials, None)
+
+
+def _execute_refine(spec, rows, stats, deps: Deps, rep, dirs) -> int:
+    """Guided refinement: the auto-tune sweep machinery (three-way split,
+    best-so-far upload, budget gate, test-split headline) plus an early stop.
+    Rounds follow `grid` in order and stop at the first of: the round cap,
+    `patience` rounds in a row that fail to beat the best by more than
+    1 percent (evalmath.improved), or the budget gate."""
+    rf = spec.refine
+    return _execute_sweep(spec, rows, stats, deps, rep, dirs, rf, rf.grid, rf)
+
+
+def _execute_sweep(spec, rows, stats, deps: Deps, rep, dirs, at, trial_list, rf) -> int:
     """N trials on this one box, inside the one prepaid block.
 
     Money/honesty rules (Codex design review, 2026-09-24):
@@ -302,7 +381,6 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
       * Before trial k>1 starts: elapsed + estimate + reserve must fit the
         budget, else the remaining trials are skipped (reported, not hidden).
     """
-    at = spec.autotune
     r = spec.recipe
     t0 = deps.clock()
 
@@ -315,12 +393,17 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
         rep.result("failed", {"error": f"dataset error: {e}", "exit_code": EXIT_DATA})
         return EXIT_DATA
 
-    n = len(at.trials)
+    n = len(trial_list)
     # Trial 1 must fit too. The backend refuses such a block before charging,
     # so reaching this means the backend authored an impossible budget: our
     # fault, refunded (exit 2), rather than starting work the deadline kills
     # before any model exists.
     if at.trial_estimate_seconds + at.reserve_seconds > at.budget_seconds:
+        if rf is not None:
+            rep.result("failed", {"error": "spec: refine budget cannot fit a single round",
+                                  "exit_code": EXIT_SPEC, "autotune": True,
+                                  "refine": {"rounds_run": 0, "max_rounds": n, "stopped_reason": "budget"}})
+            return EXIT_SPEC
         rep.result("failed", {"error": "spec: auto-tune budget cannot fit a single trial",
                               "exit_code": EXIT_SPEC, "autotune": True})
         return EXIT_SPEC
@@ -331,12 +414,18 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
     last_wall: float | None = None
     skipped = 0
     infra_failures = 0
+    stale = 0                          # refine: rounds in a row that did not beat the best by >1%
+    stopped_reason = "max_rounds"
 
-    for idx, t in enumerate(at.trials, start=1):
+    for idx, t in enumerate(trial_list, start=1):
+        if rf is not None and best is not None and stale >= rf.patience:
+            stopped_reason = "patience"
+            break
         elapsed = deps.clock() - t0
         est = (last_wall * 1.2) if last_wall else at.trial_estimate_seconds
         if idx > 1 and elapsed + est + at.reserve_seconds > at.budget_seconds:
             skipped = n - idx + 1
+            stopped_reason = "budget"
             break
 
         trial_recipe = replace(r, lr=t.lr, lora_rank=t.lora_rank, lora_alpha=t.lora_alpha, epochs=t.epochs)
@@ -362,6 +451,8 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
             trials.append(rec)
             rep.experiment(at.experiment_url, rec)
             deps.rmtree(tdirs["root"])
+            if best is not None:
+                stale += 1   # a failed round did not beat the best either
             continue
 
         wall = deps.clock() - started
@@ -372,6 +463,11 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
                "wall_seconds": round(wall, 1), "engine": outcome.get("engine")}
         trials.append(rec)
         rep.experiment(at.experiment_url, rec)
+
+        if best is None or improved(best["score"], score):
+            stale = 0
+        else:
+            stale += 1
 
         if best is None or score < best["score"]:   # ties keep the earlier (default-first) trial
             if best_dirs is not None:
@@ -389,9 +485,19 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
         else:
             deps.rmtree(tdirs["root"])
 
+    refine_info = None if rf is None else {
+        "rounds_run": len(trials), "max_rounds": n, "stopped_reason": stopped_reason}
+
     if best is None:
         all_infra = infra_failures == len(trials) and len(trials) > 0
         code = EXIT_INFRA if all_infra else EXIT_TRAIN
+        if rf is not None:
+            rep.result("failed", {
+                "error": ("every refine round failed on our side" if all_infra
+                          else "training failed: every refine round failed"),
+                "exit_code": code, "autotune": True, "trials": trials, "trials_skipped": skipped,
+                "refine": refine_info})
+            return code
         rep.result("failed", {
             "error": ("every auto-tune trial failed on our side" if all_infra
                       else "training failed: every auto-tune trial failed"),
@@ -409,6 +515,14 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
         except Exception as e:  # noqa: BLE001 — the model is still delivered
             test_error = str(e)[:300]
             baseline_test = final_test = None
+
+    # Samples run after the test eval and BEFORE GGUF, only if the reserve is
+    # still fully intact afterwards, so GGUF and the uploads keep their time.
+    # The adapter is normally already delivered by the best-so-far upload.
+    samples_time_ok = (deps.clock() - t0 + samples_mod.ESTIMATE_SECONDS + at.reserve_seconds
+                       <= at.budget_seconds)
+    samples_fields = _samples_stage(deps, spec, best_dirs, rep, test_rows, best_dirs["merged_dir"],
+                                    r, samples_time_ok, 0.92)
 
     # GGUF only if the budget still allows; the adapter is already delivered.
     gguf_ok, gguf_error = True, None
@@ -453,6 +567,9 @@ def _execute_autotune(spec, rows, stats, deps: Deps, rep, dirs) -> int:
         "trained_repo": bo.get("trained_repo"),
         "trained_revision": bo.get("trained_revision"),
     }
+    if refine_info is not None:
+        report["refine"] = refine_info
+    report.update(samples_fields)
 
     rep.progress("uploading", 0.97)
     if delivered_idx != best["idx"]:
@@ -497,6 +614,11 @@ def _lazy_evaluate(model_ref, revision, rows, recipe):
     return evaluate_rows(model_ref, revision, rows, recipe)
 
 
+def _lazy_generate(model_ref, revision, prompts, recipe, max_new_tokens):
+    from .trainer import generate_answers
+    return generate_answers(model_ref, revision, prompts, recipe, max_new_tokens)
+
+
 def _default_deps() -> Deps:
     from .convert import to_gguf
     from .trainer import run_finetune
@@ -529,6 +651,7 @@ def _default_deps() -> Deps:
         write_report=_write_report,
         tar=tar_dir,
         evaluate=_lazy_evaluate,
+        generate=_lazy_generate,
         sha256=_sha256_file,
         prepare_resume=prepare_resume_checkpoint,
     )

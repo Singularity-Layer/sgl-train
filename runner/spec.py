@@ -67,6 +67,20 @@ class Autotune:
 
 
 @dataclass(frozen=True)
+class Refine:
+    """Guided refinement: train round after round through `grid` (entry 1 is
+    the default recipe) and stop at the round cap, when `patience` rounds in a
+    row fail to beat the best by more than 1 percent, or at the budget gate."""
+    max_rounds: int
+    patience: int
+    grid: tuple[Trial, ...]      # exactly max_rounds entries, in order
+    budget_seconds: int
+    trial_estimate_seconds: int
+    reserve_seconds: int
+    experiment_url: str
+
+
+@dataclass(frozen=True)
 class RuntimeBudget:
     budget_seconds: int
     finalization_reserve_seconds: int
@@ -90,6 +104,8 @@ class ResumeCheckpoint:
 
 
 MAX_TRIALS = 6
+MIN_ROUNDS, MAX_ROUNDS = 2, 16
+MAX_GRID = 64
 
 
 @dataclass(frozen=True)
@@ -113,6 +129,7 @@ class JobSpec:
     runtime: RuntimeBudget | None = None
     checkpoint_urls: dict[str, str] | None = None
     resume: ResumeCheckpoint | None = None
+    refine: Refine | None = None
 
 
 def _req(d: dict, key: str, where: str) -> object:
@@ -308,11 +325,16 @@ def parse_spec(raw: dict) -> JobSpec:
     _check_url("result_url", result_url)
 
     autotune = _parse_autotune(raw.get("autotune"))
+    refine = _parse_refine(raw.get("refine"))
+    if autotune is not None and refine is not None:
+        raise SpecError("refine and autotune are mutually exclusive")
     runtime = _parse_runtime(raw.get("runtime"))
     checkpoint_urls = _parse_checkpoint_urls(raw.get("checkpoint_urls"))
     resume = _parse_resume(raw.get("resume"))
     if autotune is not None and (runtime is not None or checkpoint_urls is not None or resume is not None):
         raise SpecError("autotune cannot be combined with runtime, checkpoint_urls, or resume")
+    if refine is not None and (runtime is not None or checkpoint_urls is not None or resume is not None):
+        raise SpecError("refine cannot be combined with runtime, checkpoint_urls, or resume")
     if resume is not None and checkpoint_urls is None:
         raise SpecError("resume requires checkpoint_urls so progress can continue safely")
 
@@ -336,6 +358,7 @@ def parse_spec(raw: dict) -> JobSpec:
         runtime=runtime,
         checkpoint_urls=checkpoint_urls,
         resume=resume,
+        refine=refine,
     )
 
 
@@ -377,6 +400,52 @@ def _parse_autotune(raw: object) -> Autotune | None:
         budget_seconds=_pos_int("budget_seconds", raw.get("budget_seconds"), 600, 48 * 3600),
         trial_estimate_seconds=_pos_int("trial_estimate_seconds", raw.get("trial_estimate_seconds"), 1, 48 * 3600),
         reserve_seconds=_pos_int("reserve_seconds", raw.get("reserve_seconds"), 0, 48 * 3600),
+        experiment_url=experiment_url,
+    )
+
+
+def _refine_int(where: str, value: object, lo: int, hi: int) -> int:
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise SpecError(f"refine: '{where}' must be an integer") from None
+    if n < lo or n > hi:
+        raise SpecError(f"refine: '{where}' must be between {lo} and {hi}")
+    return n
+
+
+def _parse_refine(raw: object) -> Refine | None:
+    """Absent/null = not a refine run. Present = strict, like autotune: a
+    malformed refine block is a spec error (EXIT_SPEC, refunded). Every grid
+    value goes through the same CLAMPS as an autotune trial."""
+    if raw is None:
+        return None
+    if not isinstance(raw, dict):
+        raise SpecError("refine: must be an object")
+    max_rounds = _refine_int("max_rounds", raw.get("max_rounds"), MIN_ROUNDS, MAX_ROUNDS)
+    patience = _refine_int("patience", raw.get("patience", 3), 1, 5)
+    grid_raw = raw.get("grid")
+    if not isinstance(grid_raw, list) or not (max_rounds <= len(grid_raw) <= MAX_GRID):
+        raise SpecError(f"refine: 'grid' must be a list of max_rounds to {MAX_GRID} entries")
+    grid = []
+    for i, t in enumerate(grid_raw[:max_rounds]):
+        if not isinstance(t, dict):
+            raise SpecError(f"refine: grid entry {i + 1} must be an object")
+        grid.append(Trial(
+            lr=_clamp("lr", t.get("lr", 2e-4)),
+            lora_rank=_clamp("lora_rank", t.get("lora_rank", 16)),
+            lora_alpha=_clamp("lora_alpha", t.get("lora_alpha", 32)),
+            epochs=_clamp("epochs", t.get("epochs", 3)),
+        ))
+    experiment_url = str(_req(raw, "experiment_url", "refine"))
+    _check_url("refine.experiment_url", experiment_url)
+    return Refine(
+        max_rounds=max_rounds,
+        patience=patience,
+        grid=tuple(grid),
+        budget_seconds=_refine_int("budget_seconds", raw.get("budget_seconds"), 600, 48 * 3600),
+        trial_estimate_seconds=_refine_int("trial_estimate_seconds", raw.get("trial_estimate_seconds"), 1, 48 * 3600),
+        reserve_seconds=_refine_int("reserve_seconds", raw.get("reserve_seconds"), 0, 48 * 3600),
         experiment_url=experiment_url,
     )
 

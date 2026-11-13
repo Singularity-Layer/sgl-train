@@ -69,6 +69,24 @@ optimizer boundary, loads optimizer state with PyTorch's restricted
 `weights_only` loader, and rejects oversized or unsafe archives. Auto-tune
 sweeps cannot be combined with plain-run runtime/checkpoint/resume controls.
 
+## Guided refinement and sample answers
+
+An optional `refine` block (mutually exclusive with `autotune`) runs training
+rounds through a server-authored `grid` on the same three-way split as
+auto-tune. It keeps the best adapter by validation score, uploads it whenever a
+new best appears, and stops at the first of: `max_rounds` (2 to 16), `patience`
+rounds in a row (1 to 5, default 3) that fail to beat the best by more than
+1 percent, or the budget gate. The report adds
+`refine: {rounds_run, max_rounds, stopped_reason}`.
+
+When `artifact_urls.samples` is present, any run mode also writes
+`samples.jsonl`: up to 40 prompts from the held-out test split with one greedy
+answer from the base model and one from the tuned model (256 new tokens,
+every field cut to 2000 characters). When every reference is a short label
+(32 characters or fewer), the report adds exact-match accuracy before and
+after. Samples are best-effort and only run when the block still has time
+after its reserve; a failure sets `samples_ok: false` and never fails the run.
+
 ## Engines
 
 Two training engines share the same load → baseline_eval → wrap-with-LoRA →
