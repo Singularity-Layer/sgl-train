@@ -5,6 +5,7 @@ import json
 import os
 import site
 import sys
+import time
 from pathlib import Path
 from typing import Callable
 
@@ -60,10 +61,6 @@ def run(entrypoint: Callable[[], int] | None = None) -> int:
     if os.environ.get("SGL_RUNTIME_PROBE", "").strip().lower() == "true":
         return runtime_probe()
 
-    # Import after sys.path is wired so torch/transformers resolve exclusively
-    # from the immutable volume runtime rather than this tiny image.
-    from .main import _default_deps, execute
-
     try:
         raw = json.loads(os.environ.get("SGL_JOB_SPEC", ""))
     except (TypeError, ValueError):
@@ -72,7 +69,51 @@ def run(entrypoint: Callable[[], int] | None = None) -> int:
     if not isinstance(raw, dict):
         print("[sgl] SGL_JOB_SPEC must be an object", file=sys.stderr)
         return 2
-    return execute(raw, _default_deps())
+
+    # Proof of life BEFORE the heavy libraries load from the network volume (torch, unsloth: many
+    # seconds to minutes on a machine whose volume cache is cold). The backend's boot watchdog
+    # then knows this box is slow, not dead. Never blocks or fails the run.
+    boot_ping(raw)
+
+    # Import after sys.path is wired so torch/transformers resolve exclusively
+    # from the immutable volume runtime rather than this tiny image.
+    started = time.monotonic()
+    from .main import _default_deps, execute
+    deps = _default_deps()
+    print(f"[sgl] runtime libraries loaded in {time.monotonic() - started:.1f}s", flush=True)
+    log_gpu_probe()
+    return execute(raw, deps)
+
+
+def _ping_url_ok(url: str) -> bool:
+    return url.startswith("https://") or url.startswith(("http://127.0.0.1", "http://localhost"))
+
+
+def boot_ping(raw: dict, reporter_cls=None) -> bool:
+    """One best-effort 'booting' progress POST (one attempt, no retries). The backend stores it as
+    a boot marker only: it is not a heartbeat and never starts the paid clock."""
+    try:
+        run_id, url, token = raw.get("run_id"), raw.get("progress_url"), raw.get("token")
+        if not all(isinstance(v, str) and v for v in (run_id, url, token)) or not _ping_url_ok(url):
+            return False
+        if reporter_cls is None:
+            from .report import Reporter as reporter_cls  # stdlib only
+        ok = reporter_cls(url, str(raw.get("result_url") or ""), token, run_id)._send(
+            url, {"run_id": run_id, "phase": "booting", "pct": 0.0}, 1)
+        print(f"[sgl] boot ping {'sent' if ok else 'not acknowledged'}", flush=True)
+        return bool(ok)
+    except Exception as exc:  # noqa: BLE001 - a failed ping must never stop a paid run
+        print(f"[sgl] boot ping failed: {type(exc).__name__}", file=sys.stderr, flush=True)
+        return False
+
+
+def log_gpu_probe() -> None:
+    """The SGL_RUNTIME_PROBE self-test, timed and log-only on every real run (a few seconds):
+    shows in the provider log whether the GPU stack works on this machine. Never fails the run;
+    a broken stack fails in training with its own error."""
+    started = time.monotonic()
+    code = runtime_probe()
+    print(f"[sgl] gpu self-test {'ok' if code == 0 else 'FAILED'} in {time.monotonic() - started:.1f}s", flush=True)
 
 
 def runtime_probe() -> int:
